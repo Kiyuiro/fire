@@ -98,14 +98,14 @@ struct FireProfileActivityTimelineView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(FireTheme.canvasTop)
+        .background(FireTheme.canvasMid)
         .fireRespectingReduceMotion { content, reduceMotion in
             content.animation(
                 FireMotionTokens.animation(for: .standard, reduceMotion: reduceMotion),
                 value: profileViewModel.actions.map(\.fireStableBaseID)
             )
         }
-        .navigationTitle("全部动态")
+        .navigationTitle("我的动态")
         .navigationBarTitleDisplayMode(.inline)
         .fireNavigationDestination(item: $selectedRoute) { route in
             FireAppRouteDestinationView(viewModel: viewModel, route: route)

@@ -131,7 +131,10 @@ struct FireFollowListView: View {
                 Section {
                     ForEach(listViewModel.users, id: \.id) { user in
                         NavigationLink {
-                            FirePublicProfileView(viewModel: viewModel, username: user.username)
+                            FireAppRouteDestinationView(
+                                viewModel: viewModel,
+                                route: .profile(username: user.username)
+                            )
                         } label: {
                             HStack(spacing: 12) {
                                 FireAvatarView(
@@ -161,7 +164,7 @@ struct FireFollowListView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(FireTheme.canvasTop)
+        .background(FireTheme.canvasMid)
         .navigationTitle(kind.title)
         .navigationBarTitleDisplayMode(.inline)
         .task {

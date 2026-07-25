@@ -344,7 +344,7 @@ struct FireProfileView: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            .background(FireTheme.canvasTop)
+            .background(FireTheme.canvasMid)
             .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
             .fireNavigationDestination(item: $selectedRoute) { route in
@@ -637,7 +637,7 @@ private struct FireProfileLoadTrigger: Equatable {
     let isActive: Bool
 }
 
-private struct FireSettingsView: View {
+struct FireSettingsView: View {
     @ObservedObject var viewModel: FireAppViewModel
     let canLogout: Bool
     @AppStorage(FireTheme.appearancePreferenceStorageKey) private var appearancePreferenceRawValue = FireAppearancePreference.system.rawValue
@@ -734,9 +734,9 @@ private struct FireSettingsView: View {
             .padding(.horizontal, 24)
             .padding(.top, 12)
             .padding(.bottom, 20)
-            .background(FireTheme.canvasTop)
+            .background(FireTheme.canvasMid)
         }
-        .background(FireTheme.canvasTop)
+        .background(FireTheme.canvasMid)
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(.inline)
         .alert("确认退出", isPresented: $showLogoutConfirmation) {

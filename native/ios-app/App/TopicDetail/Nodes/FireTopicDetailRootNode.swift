@@ -3,76 +3,80 @@ import UIKit
 
 /// Root Texture node for the topic-detail page.
 ///
-/// Owns:
-/// - The `ASCollectionNode` feed surface
-/// - Bottom quick reply chrome owned by the UIKit controller runtime
+/// Owns only the feed surface. Bottom quick-reply chrome is a pure UIKit view
+/// owned by `FireTopicDetailViewController` and layered above this node — that
+/// is the WeChat model and avoids Texture compositing feed text through the bar.
 ///
-/// Layout is performed by Texture on a background thread.
+/// Feed bottom inset is driven by the controller via `updateFeedBottomInset`.
 final class FireTopicDetailRootNode: ASDisplayNode {
     let feedNode: ASCollectionNode
-    let quickReplyBarNode: FireTopicQuickReplyBarNode
-    private var bottomSafeAreaInset: CGFloat = 0
     private var topChromeInset: CGFloat = 0
+    private var bottomChromeInset: CGFloat = 0
 
-    // MARK: - Init
-
-    init(
-        feedNode: ASCollectionNode,
-        quickReplyBarNode: FireTopicQuickReplyBarNode
-    ) {
+    init(feedNode: ASCollectionNode) {
         self.feedNode = feedNode
-        self.quickReplyBarNode = quickReplyBarNode
         super.init()
         automaticallyManagesSubnodes = true
-        backgroundColor = .systemBackground
+        backgroundColor = FireTheme.uiCanvas
+        isOpaque = true
         self.feedNode.style.flexGrow = 1.0
         self.feedNode.style.flexShrink = 1.0
     }
 
     @MainActor
-    func updateBottomSafeAreaInset(_ inset: CGFloat) {
-        guard abs(bottomSafeAreaInset - inset) > 0.5 else { return }
-        bottomSafeAreaInset = inset
-        quickReplyBarNode.updateBottomInset(inset)
-        setNeedsLayout()
-    }
-
-    @MainActor
     func updateTopChromeInset(_ inset: CGFloat) {
         guard abs(topChromeInset - inset) > 0.5 else { return }
-        topChromeInset = inset
-        setNeedsLayout()
+        topChromeInset = max(inset, 0)
+        applyFeedContentInsets()
+    }
+
+    /// Space reserved under the feed for the quick-reply bar (+ keyboard when up).
+    @MainActor
+    func updateFeedBottomInset(_ inset: CGFloat) {
+        guard abs(bottomChromeInset - inset) > 0.5 else { return }
+        bottomChromeInset = max(inset, 0)
+        applyFeedContentInsets()
     }
 
     override func layout() {
         super.layout()
-        guard let scrollView = feedNode.view as? UIScrollView else { return }
+        applyFeedContentInsets()
+    }
+
+    override func layoutSpecThatFits(_ constrainedSize: ASSizeRange) -> ASLayoutSpec {
+        ASWrapperLayoutSpec(layoutElement: feedNode)
+    }
+
+    private func applyFeedContentInsets() {
+        // layout() is main-thread; still guard so call sites never touch UIScrollView off-main.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyFeedContentInsets()
+            }
+            return
+        }
+        guard feedNode.isNodeLoaded,
+              let scrollView = feedNode.view as? UIScrollView else { return }
         var insets = scrollView.contentInset
         insets.top = topChromeInset
-        if !quickReplyBarNode.isHidden {
-            insets.bottom = quickReplyBarNode.calculatedSize.height
-        } else {
-            insets.bottom = bottomSafeAreaInset
-        }
+        insets.bottom = bottomChromeInset
         if abs(scrollView.contentInset.top - insets.top) > 0.5
             || abs(scrollView.contentInset.bottom - insets.bottom) > 0.5 {
             scrollView.contentInset = insets
             scrollView.scrollIndicatorInsets = insets
         }
     }
+}
 
-    // MARK: - Layout
-
-    override func layoutSpecThatFits(_ constrainedSize: ASSizeRange) -> ASLayoutSpec {
-        if !quickReplyBarNode.isHidden {
-            let replyOverlay = ASRelativeLayoutSpec(
-                horizontalPosition: .start,
-                verticalPosition: .end,
-                sizingOption: [],
-                child: quickReplyBarNode
-            )
-            return ASOverlayLayoutSpec(child: feedNode, overlay: replyOverlay)
-        }
-        return ASWrapperLayoutSpec(layoutElement: feedNode)
-    }
+/// Feed bottom inset for topic detail.
+///
+/// When the quick-reply bar is visible, pass `barHeight + keyboardOverlap`.
+/// When hidden, pass the home-indicator safe-area inset only.
+func fireTopicDetailFeedBottomInset(
+    quickReplyBarHeight: CGFloat,
+    safeAreaBottom: CGFloat,
+    keyboardOverlap: CGFloat,
+    isQuickReplyVisible: Bool
+) -> CGFloat {
+    isQuickReplyVisible ? quickReplyBarHeight + keyboardOverlap : safeAreaBottom
 }

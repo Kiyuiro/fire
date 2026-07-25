@@ -41,16 +41,17 @@ final class FireTopicDetailModalRouter {
             topicDetailStore: topicDetailStore,
             navigationControllerProvider: { [weak navigationController] in navigationController }
         )
-        let rootView = FireFilteredTopicListView(
+        let controller = FireFilteredTopicListViewController(
             viewModel: viewModel,
+            topicDetailStore: topicDetailStore,
             title: filterRoute.title,
             categorySlug: filterRoute.categorySlug,
             categoryId: filterRoute.categoryId,
             parentCategorySlug: filterRoute.parentCategorySlug,
-            tag: filterRoute.tag
+            tag: filterRoute.tag,
+            topicRoutePresenter: topicRoutePresenter
         )
-        .fireTopicRoutePresenter(topicRoutePresenter)
-        navigationController.pushViewController(UIHostingController(rootView: rootView), animated: true)
+        navigationController.pushViewController(controller, animated: true)
     }
 
     func presentProfile(username: String) {
@@ -307,6 +308,9 @@ final class FireTopicDetailModalRouter {
     }
 
     private func presentSheetController(_ controller: UIViewController) {
+        if controller.view.backgroundColor == nil || controller.view.backgroundColor == .systemBackground {
+            controller.view.backgroundColor = FireTheme.uiCanvas
+        }
         if let sheet = controller.sheetPresentationController {
             sheet.detents = [.medium(), .large()]
             sheet.prefersGrabberVisible = true

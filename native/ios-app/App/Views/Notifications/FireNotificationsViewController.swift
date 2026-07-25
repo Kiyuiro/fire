@@ -138,7 +138,7 @@ final class FireNotificationsViewController: UIViewController {
         self.controllerReference = controllerReference
         self.listController = FireListViewController(
             layout: FireCollectionLayouts.plainList(),
-            backgroundColor: .systemBackground,
+            backgroundColor: FireTheme.uiCanvas,
             onSelectItem: { [controllerReference] item in
                 controllerReference.controller?.handleSelection(item)
             },
@@ -174,7 +174,7 @@ final class FireNotificationsViewController: UIViewController {
 
         title = "通知"
         navigationItem.largeTitleDisplayMode = .never
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = FireTheme.uiCanvas
 
         installListController()
         bindStore()
@@ -383,7 +383,7 @@ final class FireNotificationsViewController: UIViewController {
                 notificationStore: notificationStore,
                 topicDetailStore: topicDetailStore
             )
-            navigationController?.pushViewController(controller, animated: true)
+            FireRootCoordinator.presentSecondary(controller)
         case .blockingError, .loading, .empty, .offlineBanner, .inlineErrorBanner:
             break
         }
@@ -483,20 +483,14 @@ final class FireNotificationsViewController: UIViewController {
             navigationState.presentTopicRoute(route)
             return
         }
-
-        guard let navigationController else { return }
-        let presenter = FireAppRouteControllerFactory.makeTopicRoutePresenter(
-            viewModel: appViewModel,
-            topicDetailStore: topicDetailStore,
-            navigationControllerProvider: { [weak navigationController] in navigationController }
-        )
-        let controller = FireAppRouteControllerFactory.makeViewController(
-            viewModel: appViewModel,
-            topicDetailStore: topicDetailStore,
-            route: route,
-            topicRoutePresenter: presenter
-        )
-        navigationController.pushViewController(controller, animated: true)
+        if route.presentsAsSecondaryPage {
+            FireAppRouteControllerFactory.presentSecondaryRoute(
+                route,
+                viewModel: appViewModel,
+                topicDetailStore: topicDetailStore
+            )
+            return
+        }
     }
 
     private func presentShareSheet(url: URL) {
@@ -514,45 +508,12 @@ final class FireNotificationsViewController: UIViewController {
     }
 
     private func showToast(_ message: String, style: FireTopicListToastView.Style) {
-        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         toastDismissTask?.cancel()
         toastView?.removeFromSuperview()
-
-        let toast = FireTopicListToastView(message: message, style: style)
-        view.addSubview(toast)
-        toast.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            toast.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            toast.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            toast.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-        ])
-        toastView = toast
-        toast.alpha = 0
-        toast.transform = CGAffineTransform(translationX: 0, y: -8)
-        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
-            toast.alpha = 1
-            toast.transform = .identity
-        }
-
-        toastDismissTask = Task { [weak self, weak toast] in
-            try? await Task.sleep(for: .seconds(2))
-            await MainActor.run {
-                guard let self, self.toastView === toast else { return }
-                self.hideToast()
-            }
-        }
-    }
-
-    private func hideToast() {
-        guard let toast = toastView else { return }
         toastView = nil
-        UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseIn]) {
-            toast.alpha = 0
-            toast.transform = CGAffineTransform(translationX: 0, y: -8)
-        } completion: { _ in
-            toast.removeFromSuperview()
-        }
+        FireUIKitToast.show(message, style: FireUIKitToast.Style(style), in: view)
     }
+
 }
 
 @MainActor
@@ -668,7 +629,7 @@ final class FireNotificationHistoryViewController: UIViewController {
         self.controllerReference = controllerReference
         self.listController = FireListViewController(
             layout: FireCollectionLayouts.plainList(),
-            backgroundColor: .systemBackground,
+            backgroundColor: FireTheme.uiCanvas,
             onSelectItem: { [controllerReference] item in
                 controllerReference.controller?.handleSelection(item)
             },
@@ -710,7 +671,7 @@ final class FireNotificationHistoryViewController: UIViewController {
 
         title = "全部通知"
         navigationItem.largeTitleDisplayMode = .never
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = FireTheme.uiCanvas
 
         installListController()
         bindStore()
@@ -1036,20 +997,14 @@ final class FireNotificationHistoryViewController: UIViewController {
             navigationState.presentTopicRoute(route)
             return
         }
-
-        guard let navigationController else { return }
-        let presenter = FireAppRouteControllerFactory.makeTopicRoutePresenter(
-            viewModel: appViewModel,
-            topicDetailStore: topicDetailStore,
-            navigationControllerProvider: { [weak navigationController] in navigationController }
-        )
-        let controller = FireAppRouteControllerFactory.makeViewController(
-            viewModel: appViewModel,
-            topicDetailStore: topicDetailStore,
-            route: route,
-            topicRoutePresenter: presenter
-        )
-        navigationController.pushViewController(controller, animated: true)
+        if route.presentsAsSecondaryPage {
+            FireAppRouteControllerFactory.presentSecondaryRoute(
+                route,
+                viewModel: appViewModel,
+                topicDetailStore: topicDetailStore
+            )
+            return
+        }
     }
 
     private func presentShareSheet(url: URL) {
@@ -1067,45 +1022,12 @@ final class FireNotificationHistoryViewController: UIViewController {
     }
 
     private func showToast(_ message: String, style: FireTopicListToastView.Style) {
-        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         toastDismissTask?.cancel()
         toastView?.removeFromSuperview()
-
-        let toast = FireTopicListToastView(message: message, style: style)
-        view.addSubview(toast)
-        toast.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            toast.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            toast.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            toast.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-        ])
-        toastView = toast
-        toast.alpha = 0
-        toast.transform = CGAffineTransform(translationX: 0, y: -8)
-        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
-            toast.alpha = 1
-            toast.transform = .identity
-        }
-
-        toastDismissTask = Task { [weak self, weak toast] in
-            try? await Task.sleep(for: .seconds(2))
-            await MainActor.run {
-                guard let self, self.toastView === toast else { return }
-                self.hideToast()
-            }
-        }
-    }
-
-    private func hideToast() {
-        guard let toast = toastView else { return }
         toastView = nil
-        UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseIn]) {
-            toast.alpha = 0
-            toast.transform = CGAffineTransform(translationX: 0, y: -8)
-        } completion: { _ in
-            toast.removeFromSuperview()
-        }
+        FireUIKitToast.show(message, style: FireUIKitToast.Style(style), in: view)
     }
+
 }
 
 final class FireNotificationListCell: UICollectionViewCell {

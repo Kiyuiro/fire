@@ -26,6 +26,7 @@ import androidx.webkit.SafeBrowsingResponseCompat
 import androidx.webkit.WebResourceErrorCompat
 import androidx.webkit.WebViewClientCompat
 import androidx.webkit.WebViewFeature
+import com.fire.app.FireApplication
 import com.fire.app.R
 import com.fire.app.core.error.launchWithFireErrorHandling
 import com.fire.app.session.FireAppStateRefreshRepository
@@ -38,9 +39,13 @@ import com.fire.app.session.FireSessionStoreRepository
 import com.fire.app.session.FireWebViewLoginCoordinator
 import com.fire.app.ui.webview.FireWebViewSupport
 import com.google.android.material.button.MaterialButton
+import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uniffi.fire_uniffi_session.CloudflareChallengeRequestState
@@ -59,6 +64,7 @@ class LoginWebViewFragment : Fragment() {
     private var lastLoginHcaptchaToken: String? = null
     private var lastLoginSecondFactorToken: String? = null
     private var cfRetryUsed = false
+    private var oauthPollJob: Job? = null
 
     private val loginBaseUrl = "https://linux.do"
 
@@ -89,6 +95,8 @@ class LoginWebViewFragment : Fragment() {
 
             configureLoginWebView(webView)
             webView.addJavascriptInterface(FireLoginJsInterface(this@LoginWebViewFragment), "Android")
+            // Poll OAuth readiness and active CF interstitials for password + OAuth.
+            startLoginSurfacePolling(webView)
 
             identifierInput.setText(credential?.username.orEmpty())
             passwordInput.setText(credential?.password.orEmpty())
@@ -114,6 +122,8 @@ class LoginWebViewFragment : Fragment() {
                 super.onPageFinished(view, url)
                 loadingIndicator.isVisible = false
                 updateChrome(webView, pageTitleText, pageUrlText)
+                // Google/OAuth return lands here without the password JS bridge.
+                maybeRecoverActiveCloudflareOrFinalizeExternalLogin(webView)
             }
 
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -212,6 +222,8 @@ class LoginWebViewFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        oauthPollJob?.cancel()
+        oauthPollJob = null
         val webView = view?.findViewById<WebView>(R.id.login_webview)
         webView?.destroy()
         super.onDestroyView()
@@ -251,7 +263,8 @@ class LoginWebViewFragment : Fragment() {
     }
 
     private suspend fun ensureCloudflareClearanceForLogin(sessionStore: FireSessionStore) {
-        if (sessionStore.snapshot().readiness.hasCloudflareClearance) {
+        // Skip only when clearance is present and not recently rejected by CF.
+        if (sessionStore.cloudflareClearanceIsTrusted()) {
             return
         }
         val result = withContext(Dispatchers.IO) {
@@ -436,7 +449,7 @@ class LoginWebViewFragment : Fragment() {
             syncButton.isEnabled = true
             Toast.makeText(
                 requireContext(),
-                R.string.login_cloudflare_retry_failed,
+                loginCloudflareFailureMessage(null),
                 Toast.LENGTH_LONG,
             ).show()
             return
@@ -473,9 +486,13 @@ class LoginWebViewFragment : Fragment() {
             if (!result.completed) {
                 isCompletingLogin = false
                 syncButton.isEnabled = true
+                val reason = when {
+                    result.userCancelled -> "cancelled"
+                    else -> "failed"
+                }
                 Toast.makeText(
                     requireContext(),
-                    R.string.login_cloudflare_retry_failed,
+                    loginCloudflareFailureMessage(reason),
                     Toast.LENGTH_LONG,
                 ).show()
                 return@launchWithFireErrorHandling
@@ -486,7 +503,7 @@ class LoginWebViewFragment : Fragment() {
                 syncButton.isEnabled = true
                 Toast.makeText(
                     requireContext(),
-                    R.string.login_cloudflare_retry_failed,
+                    loginCloudflareFailureMessage("failed"),
                     Toast.LENGTH_LONG,
                 ).show()
                 return@launchWithFireErrorHandling
@@ -510,6 +527,94 @@ class LoginWebViewFragment : Fragment() {
         }
     }
 
+    private fun startLoginSurfacePolling(webView: WebView) {
+        oauthPollJob?.cancel()
+        oauthPollJob = viewLifecycleOwner.lifecycleScope.launch {
+            while (isActive) {
+                delay(1_000)
+                if (!isCompletingLogin) {
+                    maybeRecoverActiveCloudflareOrFinalizeExternalLogin(webView)
+                }
+            }
+        }
+    }
+
+    private fun maybeRecoverActiveCloudflareOrFinalizeExternalLogin(webView: WebView) {
+        if (isCompletingLogin || !isAdded) return
+        val coordinator = loginCoordinator ?: return
+        val sessionStore = sessionStore ?: return
+        viewLifecycleOwner.lifecycleScope.launch {
+            if (isCompletingLogin) return@launch
+            val activeCf = runCatching {
+                withContext(Dispatchers.Main) {
+                    webView.evaluateJavascriptSuspend(FireLoginScripts.hasActiveCloudflareChallenge)
+                }
+            }.getOrNull()
+            if (activeCf == "true") {
+                runCatching {
+                    ensureCloudflareClearanceForLogin(sessionStore)
+                    withContext(Dispatchers.Main) {
+                        webView.loadUrl("$loginBaseUrl/")
+                    }
+                }
+                return@launch
+            }
+            val readiness = runCatching {
+                coordinator.probeLoginSyncReadiness(webView)
+            }.getOrNull() ?: return@launch
+            if (!readiness.isReady) return@launch
+            completeExternalLoginAndNavigate(webView, readiness.username)
+        }
+    }
+
+    private fun completeExternalLoginAndNavigate(webView: WebView, username: String?) {
+        if (isCompletingLogin) return
+        val sessionStore = requireNotNull(sessionStore)
+        val coordinator = loginCoordinator ?: return
+        isCompletingLogin = true
+        view?.findViewById<MaterialButton>(R.id.sync_button)?.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launchWithFireErrorHandling(
+            operation = "login_webview.complete_external_login",
+            sessionStore = sessionStore,
+            fallbackMessage = getString(R.string.login_sync_error),
+            onError = { error ->
+                isCompletingLogin = false
+                val identifierInput = view?.findViewById<EditText>(R.id.login_identifier_input)
+                val passwordInput = view?.findViewById<EditText>(R.id.login_password_input)
+                val syncButton = view?.findViewById<MaterialButton>(R.id.sync_button)
+                if (identifierInput != null && passwordInput != null && syncButton != null) {
+                    syncButton.isEnabled = hasEnteredCredentials(identifierInput, passwordInput)
+                }
+                Toast.makeText(requireContext(), error.displayMessage, Toast.LENGTH_SHORT).show()
+            },
+        ) {
+            // Prefer full WebView capture (username from page/meta) so OAuth works
+            // without typed password credentials.
+            if (!username.isNullOrBlank()) {
+                coordinator.completeJsLogin(webView, username)
+            } else {
+                coordinator.completeLogin(webView)
+            }
+            val snapshot = sessionStore.snapshot()
+            val refresh = com.fire.app.session.FireCfClearanceRefreshService.get(requireContext())
+            refresh.bind(sessionStore)
+            refresh.updateSession(snapshot)
+            refresh.setLoginStateConfirmed(true)
+            refresh.setSceneActive(true)
+            // fluxdo finally: trusted cookies are enough to enter home.
+            // Refresh on app scope so navigation cannot cancel it.
+            FireApplication.applicationScope().launch {
+                runCatching {
+                    sessionStore.triggerAppStateRefresh(
+                        RefreshTriggerState.LOGIN_COMPLETED,
+                        FireAppStateRefreshRepository,
+                    )
+                }
+            }
+            navigateHome()
+        }
+    }
+
     private fun completeMinimalLoginAndNavigate() {
         val sessionStore = requireNotNull(sessionStore)
         val coordinator = loginCoordinator ?: return
@@ -530,10 +635,22 @@ class LoginWebViewFragment : Fragment() {
             coordinator.completeJsLogin(webView, identifier)
             FireCredentialStore.save(requireContext(), identifier, password)
             credential = FireCredentialStore.load(requireContext())
-            sessionStore.triggerAppStateRefresh(
-                RefreshTriggerState.LOGIN_COMPLETED,
-                FireAppStateRefreshRepository,
-            )
+            val snapshot = sessionStore.snapshot()
+            val refresh = com.fire.app.session.FireCfClearanceRefreshService.get(requireContext())
+            refresh.bind(sessionStore)
+            refresh.updateSession(snapshot)
+            refresh.setLoginStateConfirmed(true)
+            refresh.setSceneActive(true)
+            // fluxdo finally: trusted cookies are enough to enter home.
+            // Refresh on app scope so navigation cannot cancel it.
+            FireApplication.applicationScope().launch {
+                runCatching {
+                    sessionStore.triggerAppStateRefresh(
+                        RefreshTriggerState.LOGIN_COMPLETED,
+                        FireAppStateRefreshRepository,
+                    )
+                }
+            }
             navigateHome()
         }
     }
@@ -545,6 +662,22 @@ class LoginWebViewFragment : Fragment() {
         isCompletingLogin = false
         findNavController().navigate(R.id.action_loginWebView_to_home)
     }
+
+    private fun loginCloudflareFailureMessage(reason: String?): String {
+        return when (reason?.trim()?.lowercase()) {
+            "cooldown" -> getString(R.string.login_cloudflare_cooldown)
+            "cancelled" -> getString(R.string.login_cloudflare_cancelled)
+            "in_progress" -> getString(R.string.login_cloudflare_in_progress)
+            else -> getString(R.string.login_cloudflare_retry_failed)
+        }
+    }
+
+    private suspend fun WebView.evaluateJavascriptSuspend(script: String): String =
+        suspendCancellableCoroutine { continuation ->
+            evaluateJavascript(script) { value ->
+                continuation.resume(value ?: "null")
+            }
+        }
 
     private fun updateChrome(
         webView: WebView,

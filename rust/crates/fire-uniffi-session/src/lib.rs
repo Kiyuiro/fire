@@ -11,11 +11,12 @@ pub mod records;
 pub use records::{
     format_probe_result, AppStateRefreshEventState, AppStateRefreshHandler, AuthRecoveryHintState,
     BootstrapState, CanonicalCookieState, CloudflareChallengeHandler,
-    CloudflareChallengeRequestState, CloudflareChallengeResultState, CookieReplayEntryState,
-    CookieSameSiteState, CookieSelfHealingHandler, CookieSelfHealingPhaseState,
-    CookieSelfHealingRequestState, CookieSelfHealingResultState, CookieSourceState, CookieState,
-    CookieSweepIntentState, CookieSweepPlanState, CurrentUserSnapshotState,
-    HomeTopicListScopeState, LoginFailureKindState, LoginFailureState,
+    CloudflareChallengeRequestState, CloudflareChallengeResultState,
+    CloudflareClearanceResolvedEventState, CloudflareClearanceResolvedHandler,
+    CookieReplayEntryState, CookieSameSiteState, CookieSelfHealingHandler,
+    CookieSelfHealingPhaseState, CookieSelfHealingRequestState, CookieSelfHealingResultState,
+    CookieSourceState, CookieState, CookieSweepIntentState, CookieSweepPlanState,
+    CurrentUserSnapshotState, HomeTopicListScopeState, LoginFailureKindState, LoginFailureState,
     LoginFinalizationResultState, LoginPhaseState, LoginStateDeterminationState, LoginSyncState,
     NuclearResetPlanState, PassiveLogoutTriggerState, PlatformCookieState, PreloadedDataStateState,
     RefreshBatchState, RefreshTriggerState, SecondFactorRequirementState, SessionPersistenceState,
@@ -164,6 +165,41 @@ impl FireSessionHandle {
             &self.shared.core,
             "unregister_cloudflare_challenge_handler",
             |inner| inner.clear_cloudflare_challenge_handler(),
+        )
+    }
+
+    pub fn register_cloudflare_clearance_resolved_handler(
+        &self,
+        handler: Arc<dyn CloudflareClearanceResolvedHandler>,
+    ) -> Result<(), FireUniFfiError> {
+        run_infallible(
+            &self.shared.panic_state,
+            &self.shared.core,
+            "register_cloudflare_clearance_resolved_handler",
+            move |inner| {
+                let handler = handler.clone();
+                inner.set_cloudflare_clearance_resolved_handler(move |event| {
+                    handler.on_clearance_resolved(event.into());
+                });
+            },
+        )
+    }
+
+    pub fn unregister_cloudflare_clearance_resolved_handler(&self) -> Result<(), FireUniFfiError> {
+        run_infallible(
+            &self.shared.panic_state,
+            &self.shared.core,
+            "unregister_cloudflare_clearance_resolved_handler",
+            |inner| inner.clear_cloudflare_clearance_resolved_handler(),
+        )
+    }
+
+    pub fn cloudflare_clearance_resolved_generation(&self) -> Result<u64, FireUniFfiError> {
+        run_infallible(
+            &self.shared.panic_state,
+            &self.shared.core,
+            "cloudflare_clearance_resolved_generation",
+            |inner| inner.cloudflare_clearance_resolved_generation(),
         )
     }
 
@@ -323,6 +359,27 @@ impl FireSessionHandle {
                     Some(fresh_cf_clearance),
                     browser_user_agent,
                 ))
+            },
+        )
+    }
+
+    /// True when jar has cf_clearance and CF has not recently rejected it.
+    pub fn cloudflare_clearance_is_trusted(&self) -> Result<bool, FireUniFfiError> {
+        run_infallible(
+            &self.shared.panic_state,
+            &self.shared.core,
+            "cloudflare_clearance_is_trusted",
+            |inner| inner.cloudflare_clearance_is_trusted(),
+        )
+    }
+
+    pub fn note_cloudflare_clearance_rejected(&self) -> Result<(), FireUniFfiError> {
+        run_infallible(
+            &self.shared.panic_state,
+            &self.shared.core,
+            "note_cloudflare_clearance_rejected",
+            |inner| {
+                inner.note_cloudflare_clearance_rejected();
             },
         )
     }
@@ -564,6 +621,18 @@ impl FireSessionHandle {
                     .into()
             },
         )
+    }
+
+    /// Post-cookie login handoff: bootstrap with timeout, never block home entry
+    /// when auth cookies are already present.
+    pub async fn finalize_login_ready(&self) -> Result<SessionState, FireUniFfiError> {
+        let inner = self.shared.core.clone();
+        let panic_state = self.shared.panic_state.clone();
+        let snapshot = run_on_ffi_runtime("finalize_login_ready", panic_state, async move {
+            inner.finalize_login_ready().await
+        })
+        .await?;
+        Ok(SessionState::from_snapshot(snapshot))
     }
 
     pub fn cookie_replay_queue(&self) -> Result<Vec<CookieReplayEntryState>, FireUniFfiError> {

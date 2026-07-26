@@ -135,6 +135,20 @@ public actor FireSessionStore {
         try core.session().unregisterCloudflareChallengeHandler()
     }
 
+    public func registerCloudflareClearanceResolvedHandler(
+        _ handler: any CloudflareClearanceResolvedHandler
+    ) throws {
+        try core.session().registerCloudflareClearanceResolvedHandler(handler: handler)
+    }
+
+    public func unregisterCloudflareClearanceResolvedHandler() throws {
+        try core.session().unregisterCloudflareClearanceResolvedHandler()
+    }
+
+    public func cloudflareClearanceResolvedGeneration() throws -> UInt64 {
+        try core.session().cloudflareClearanceResolvedGeneration()
+    }
+
     public func registerCookieSelfHealingHandler(
         _ handler: any CookieSelfHealingHandler
     ) throws {
@@ -351,6 +365,20 @@ public actor FireSessionStore {
             freshCfClearance: freshCfClearance,
             browserUserAgent: browserUserAgent
         )
+        try persistCurrentSessionIfNeeded()
+        return state
+    }
+
+    public func cloudflareClearanceIsTrusted() throws -> Bool {
+        try core.session().cloudflareClearanceIsTrusted()
+    }
+
+    public func noteCloudflareClearanceRejected() throws {
+        try core.session().noteCloudflareClearanceRejected()
+    }
+
+    public func finalizeLoginReady() async throws -> SessionState {
+        let state = try await core.session().finalizeLoginReady()
         try persistCurrentSessionIfNeeded()
         return state
     }

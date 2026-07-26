@@ -31,6 +31,7 @@ import uniffi.fire_uniffi_search.UserMentionQueryState
 import uniffi.fire_uniffi_search.UserMentionResultState
 import uniffi.fire_uniffi_session.AppStateRefreshHandler
 import uniffi.fire_uniffi_session.CloudflareChallengeHandler
+import uniffi.fire_uniffi_session.CloudflareClearanceResolvedHandler
 import uniffi.fire_uniffi_session.CookieSelfHealingHandler
 import uniffi.fire_uniffi_session.CookieReplayEntryState
 import uniffi.fire_uniffi_session.CookieSweepPlanState
@@ -105,12 +106,28 @@ class FireSessionStore(
         core.session().snapshot()
     }
 
+    suspend fun currentSessionEpoch(): ULong = withContext(Dispatchers.Default) {
+        core.session().sessionEpoch()
+    }
+
     fun registerCloudflareChallengeHandler(handler: CloudflareChallengeHandler) {
         core.session().registerCloudflareChallengeHandler(handler)
     }
 
     fun unregisterCloudflareChallengeHandler() {
         core.session().unregisterCloudflareChallengeHandler()
+    }
+
+    fun registerCloudflareClearanceResolvedHandler(handler: CloudflareClearanceResolvedHandler) {
+        core.session().registerCloudflareClearanceResolvedHandler(handler)
+    }
+
+    fun unregisterCloudflareClearanceResolvedHandler() {
+        core.session().unregisterCloudflareClearanceResolvedHandler()
+    }
+
+    fun cloudflareClearanceResolvedGeneration(): ULong {
+        return core.session().cloudflareClearanceResolvedGeneration()
     }
 
     fun registerCookieSelfHealingHandler(handler: CookieSelfHealingHandler) {
@@ -193,6 +210,20 @@ class FireSessionStore(
             freshCfClearance = freshCfClearance,
             browserUserAgent = browserUserAgent,
         )
+        persistCurrentSession()
+        state
+    }
+
+    suspend fun cloudflareClearanceIsTrusted(): Boolean = withContext(Dispatchers.Default) {
+        core.session().cloudflareClearanceIsTrusted()
+    }
+
+    suspend fun noteCloudflareClearanceRejected() = withContext(Dispatchers.Default) {
+        core.session().noteCloudflareClearanceRejected()
+    }
+
+    suspend fun finalizeLoginReady(): SessionState = withContext(Dispatchers.Default) {
+        val state = core.session().finalizeLoginReady()
         persistCurrentSession()
         state
     }

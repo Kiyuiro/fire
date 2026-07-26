@@ -289,9 +289,24 @@ On login success:
 
 1. Extract `_t`, `_forum_session`, `cf_clearance`, `_cfuvid`, and related
    LinuxDo cookies from the live WebView.
-2. Send those cookies to Rust as trusted WebView-login cookies.
-3. Include the browser user agent when available.
-4. Call the single Rust login finalizer before disposing the WebView.
+2. Resolve the current username from `meta[name=current-username]` or
+   `Discourse.User.current()`.
+3. Send those cookies to Rust as trusted WebView-login cookies.
+4. Include the browser user agent when available.
+5. Call the single Rust login finalizer before disposing the WebView.
+
+### 11.1 Ready gate for auto-finalize (password JS and OAuth)
+
+A WebView login surface may auto-finalize when **both** are true:
+
+1. Active `_t` and `_forum_session` cookies are present in the WebView store.
+2. A non-empty current username is readable from the page.
+
+Reusable homepage bootstrap HTML is preferred but **not required** to start
+finalization. If bootstrap markup is missing after OAuth return, finalize the
+cookie handoff first and refresh bootstrap over HTTP. This matches the fluxdo
+WebView login page behavior: detect username + `_t`, sync cookies, then hydrate
+or refresh preloaded data with a timeout fallback.
 
 Rust finalization:
 
@@ -303,17 +318,32 @@ Rust finalization:
    HTTP.
 6. Uses an 8 second timeout for login-ready refresh.
 7. Always notifies login-ready in `finally` semantics.
+8. Hosts enter home / dismiss login UI as soon as login-ready returns; broader
+   app-state refresh is fire-and-forget and must not re-block the handoff.
 
 The UI must never remain permanently loading because bootstrap refresh failed or
-timed out after a successful cookie handoff.
+timed out after a successful cookie handoff. OAuth browser hosts must await
+cookie finalization (`finalize_login_ready`), dismiss themselves on success, and
+re-arm polling on transient failure — without waiting on the full home refresh
+batch.
 
-## 12. Deprecated Normal Path
+## 12. Browser / OAuth Surfaces
 
-The older password-login design loaded `https://linux.do/login`, injected page
-scripts, and inferred success from page state or navigation. That path is not the
-normal Fire implementation target.
+Password login should stay on the minimal native WebView JS path. Separate
+browser surfaces remain required for Google/GitHub/X/Discord/Apple OAuth,
+passkeys, and email-link login.
 
-Browser login surfaces may still be needed later for distinct features such as
-OAuth provider flows, passkeys, or email-link login. Those features must be
-designed separately and must not reintroduce the Ember `/login` page as the
-password-login fallback.
+Those surfaces must:
+
+1. Keep OAuth inside one WebView (no external browser handoff for the Discourse
+   callback).
+2. Poll WebView cookies after IdP return and also probe on `didFinish`.
+3. Auto-finalize with the §11.1 ready gate.
+4. Await cookie sync + bounded login-ready bootstrap, then enter home.
+   Do not block entry on the full post-login app-state refresh batch.
+5. While the login WebView is active (password dialog or OAuth browser), poll the
+   shared active-CF page markers. On hit, run the same-origin manual challenge,
+   re-prime without writing jar `cf_clearance` back, and continue finalize / retry.
+
+They must not reintroduce the Ember `/login` page as the password-login
+fallback.

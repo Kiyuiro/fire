@@ -551,7 +551,8 @@ async fn fetch_topic_list_surfaces_cloudflare_challenge_error() {
     assert!(matches!(
         error,
         FireCoreError::CloudflareChallenge {
-            operation: "fetch topic list"
+            operation: "fetch topic list",
+            ..
         }
     ));
 }
@@ -865,6 +866,7 @@ async fn business_request_is_blocked_while_cloudflare_challenge_is_in_progress()
     });
     challenge_started.notified().await;
 
+    // New outbound traffic that has not yet hit CF is frozen at dispatch.
     let blocked = core
         .fetch_topic_list(TopicListQuery {
             kind: TopicListKind::Latest,
@@ -889,6 +891,112 @@ async fn business_request_is_blocked_while_cloudflare_challenge_is_in_progress()
 
     assert_eq!(response.rows.len(), 1);
     assert_eq!(requests.len(), 2);
+}
+
+#[tokio::test]
+async fn concurrent_cloudflare_challenges_join_and_retry_after_shared_success() {
+    let challenge_body =
+        r#"<html><head><title>Just a moment...</title></head><body>__cf_chl_opt</body></html>"#;
+    let server = TestServer::spawn_scripted(vec![
+        // Delay both CF bodies so the two clients are already in-flight before
+        // either enters the challenge owner/join path.
+        TestServerStep::delayed(
+            raw_cloudflare_challenge_response(403, challenge_body),
+            Duration::from_millis(80),
+        ),
+        TestServerStep::delayed(
+            raw_cloudflare_challenge_response(403, challenge_body),
+            Duration::from_millis(80),
+        ),
+        TestServerStep::immediate(raw_json_response(
+            200,
+            "application/json",
+            &sample_latest_json(),
+        )),
+        TestServerStep::immediate(raw_json_response(
+            200,
+            "application/json",
+            &sample_latest_json(),
+        )),
+    ])
+    .await
+    .expect("server");
+    let core = FireCore::new(FireCoreConfig {
+        base_url: server.base_url(),
+        workspace_path: None,
+    })
+    .expect("core");
+    let challenge_calls = Arc::new(AtomicUsize::new(0));
+    let challenge_started = Arc::new(Notify::new());
+    let release_challenge = Arc::new(Notify::new());
+    {
+        let challenge_calls = Arc::clone(&challenge_calls);
+        let challenge_started = Arc::clone(&challenge_started);
+        let release_challenge = Arc::clone(&release_challenge);
+        core.set_cloudflare_challenge_handler(move |_| {
+            let challenge_calls = Arc::clone(&challenge_calls);
+            let challenge_started = Arc::clone(&challenge_started);
+            let release_challenge = Arc::clone(&release_challenge);
+            async move {
+                challenge_calls.fetch_add(1, Ordering::SeqCst);
+                challenge_started.notify_waiters();
+                release_challenge.notified().await;
+                fire_models::CloudflareChallengeResult {
+                    completed: true,
+                    user_cancelled: false,
+                    fresh_cf_clearance: Some("joined-clearance".into()),
+                    cookies: vec![PlatformCookie {
+                        name: "cf_clearance".into(),
+                        value: "joined-clearance".into(),
+                        domain: Some("linux.do".into()),
+                        path: Some("/".into()),
+                        expires_at_unix_ms: None,
+                        same_site: None,
+                    }],
+                    browser_user_agent: None,
+                }
+            }
+        });
+    }
+
+    let first_core = core.clone();
+    let first = tokio::spawn(async move {
+        first_core
+            .fetch_topic_list(TopicListQuery {
+                kind: TopicListKind::Latest,
+                ..TopicListQuery::default()
+            })
+            .await
+    });
+    let second_core = core.clone();
+    let second = tokio::spawn(async move {
+        second_core
+            .fetch_topic_list(TopicListQuery {
+                kind: TopicListKind::Latest,
+                ..TopicListQuery::default()
+            })
+            .await
+    });
+
+    challenge_started.notified().await;
+    // Let the second CF victim reach the shared join wait.
+    sleep(Duration::from_millis(40)).await;
+    release_challenge.notify_waiters();
+
+    let first_response = first
+        .await
+        .expect("first task")
+        .expect("first request should succeed after shared challenge");
+    let second_response = second
+        .await
+        .expect("second task")
+        .expect("joined request should retry after shared challenge");
+    let requests = server.shutdown_with_requests().await;
+
+    assert_eq!(first_response.rows.len(), 1);
+    assert_eq!(second_response.rows.len(), 1);
+    assert_eq!(challenge_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(requests.len(), 4);
 }
 
 #[tokio::test]
@@ -937,7 +1045,8 @@ async fn foreground_retry_bypasses_cloudflare_failure_cooldown() {
         assert!(matches!(
             error,
             FireCoreError::CloudflareChallenge {
-                operation: "fetch topic list"
+                operation: "fetch topic list",
+                ..
             }
         ));
     }
@@ -1036,7 +1145,8 @@ async fn fetch_topic_list_does_not_self_heal_cloudflare_challenge_without_handle
     assert!(matches!(
         error,
         FireCoreError::CloudflareChallenge {
-            operation: "fetch topic list"
+            operation: "fetch topic list",
+            ..
         }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1164,7 +1274,8 @@ async fn fetch_topic_list_surfaces_rate_limited_cloudflare_challenge_error() {
     assert!(matches!(
         error,
         FireCoreError::CloudflareChallenge {
-            operation: "fetch topic list"
+            operation: "fetch topic list",
+            ..
         }
     ));
 }
@@ -1195,7 +1306,8 @@ async fn fetch_topic_list_accepts_cf_mitigated_challenge_without_html_content_ty
     assert!(matches!(
         error,
         FireCoreError::CloudflareChallenge {
-            operation: "fetch topic list"
+            operation: "fetch topic list",
+            ..
         }
     ));
 }
@@ -2015,6 +2127,112 @@ async fn fetch_topic_detail_source_snapshot_tracks_visit_headers_and_force_load_
 }
 
 #[tokio::test]
+async fn fetch_topic_detail_source_snapshot_recovers_missing_body_via_stream_head_post_ids() {
+    // Notification deep-links open `/t/{id}/{N}.json`. Large topics return a
+    // nearby posts chunk without OP/post #1. Body must be recovered from
+    // stream[0] via post_ids[] instead of hard-failing posts.json?post_number=1.
+    let target_post_number = 200_u32;
+    let body_post = json!({
+        "id": 1001,
+        "username": "op",
+        "cooked": "<p>Original post</p>",
+        "post_number": 1,
+        "reply_to_post_number": null,
+        "reply_count": 5
+    });
+    let target_post = json!({
+        "id": 1200,
+        "username": "replier",
+        "cooked": "<p>Deep reply</p>",
+        "post_number": target_post_number,
+        "reply_to_post_number": 1,
+        "reply_count": 0
+    });
+    let stream = (1_u64..=220).map(|n| 1000 + n).collect::<Vec<_>>();
+    let mid_topic_payload = json!({
+        "id": 123,
+        "title": "Large topic",
+        "slug": "large-topic",
+        "posts_count": 220,
+        "post_stream": {
+            "posts": [target_post.clone()],
+            "stream": stream
+        }
+    });
+    let body_by_ids = json!({
+        "post_stream": {
+            "posts": [body_post.clone()],
+            "stream": [1001]
+        }
+    });
+    // Remaining initial stream ids (1002..1010) after body recovery.
+    let initial_batch_posts = (2_u32..=10)
+        .map(|post_number| {
+            json!({
+                "id": 1000 + u64::from(post_number),
+                "username": format!("u{post_number}"),
+                "cooked": format!("<p>r{post_number}</p>"),
+                "post_number": post_number,
+                "reply_to_post_number": 1,
+                "reply_count": 0
+            })
+        })
+        .collect::<Vec<_>>();
+    let initial_batch = json!({
+        "post_stream": {
+            "posts": initial_batch_posts,
+            "stream": (1002_u64..=1010).collect::<Vec<_>>()
+        }
+    });
+
+    let server = TestServer::spawn(vec![
+        raw_json_response(200, "application/json", &mid_topic_payload.to_string()),
+        // resolve_topic_body_post: stream head via post_ids[]
+        raw_json_response(200, "application/json", &body_by_ids.to_string()),
+        // initial batch hydration for missing stream ids
+        raw_json_response(200, "application/json", &initial_batch.to_string()),
+    ])
+    .await
+    .expect("server");
+    let core = FireCore::new(FireCoreConfig {
+        base_url: server.base_url(),
+        workspace_path: None,
+    })
+    .expect("core");
+
+    let snapshot = core
+        .fetch_topic_detail_source_snapshot(TopicDetailSourceQuery {
+            topic_id: 123,
+            target_post_number: Some(target_post_number),
+            allow_suggested_unread_root: false,
+            track_visit: true,
+            force_load: true,
+            initial_batch_size: 10,
+            load_more_batch_size: 10,
+            max_auto_batches_per_gesture: 3,
+            max_auto_posts_per_gesture: 120,
+        })
+        .await
+        .expect("topic source snapshot should recover missing body");
+    let requests = server.shutdown_with_requests().await;
+
+    assert_eq!(snapshot.body.post.post_number, 1);
+    assert_eq!(snapshot.body.post.id, 1001);
+    assert!(snapshot
+        .loaded_posts
+        .iter()
+        .any(|post| post.post_number == target_post_number));
+    assert!(requests[0].contains("GET /t/123/200.json"));
+    assert!(
+        requests.iter().any(|request| {
+            request.contains("GET /t/123/posts.json") && request.contains("post_ids%5B%5D=1001")
+                || request.contains("post_ids[]=1001")
+        }),
+        "expected OP recovery via post_ids[] stream head, requests={requests:?}"
+    );
+}
+
+#[tokio::test]
 async fn fetch_topic_detail_source_snapshot_preserves_target_anchor_and_source_cursor() {
     let target_post_number = 14_u32;
     let mut detail_payload: Value =
@@ -2460,7 +2678,8 @@ async fn fetch_topic_ai_summary_surfaces_cloudflare_challenge() {
     assert!(matches!(
         error,
         FireCoreError::CloudflareChallenge {
-            operation: "fetch topic ai summary"
+            operation: "fetch topic ai summary",
+            ..
         }
     ));
 }
@@ -3887,7 +4106,8 @@ async fn create_reply_surfaces_cloudflare_challenge_error() {
     assert!(matches!(
         error,
         FireCoreError::CloudflareChallenge {
-            operation: "create reply"
+            operation: "create reply",
+            ..
         }
     ));
 }

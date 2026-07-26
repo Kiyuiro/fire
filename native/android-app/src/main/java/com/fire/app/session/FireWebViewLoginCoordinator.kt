@@ -51,11 +51,11 @@ class FireWebViewLoginCoordinator(
             captured = captured,
             allowLowConfidenceSessionCookies = false,
         )
-        if (finalization.session.loginPhase == LoginPhaseState.READY) {
+        if (!finalization.success && finalization.session.cookies.tToken.isNullOrBlank()) {
             return finalization.session
         }
-
-        return sessionStore.refreshBootstrapIfNeeded()
+        // fluxdo LoginReady: bootstrap with timeout, never block home once cookies exist.
+        return sessionStore.finalizeLoginReady()
     }
 
     suspend fun completeJsLogin(webView: WebView, identifier: String): SessionState =
@@ -264,8 +264,10 @@ class FireWebViewLoginCoordinator(
         val hasAuthCookies = containsActiveAuthCookies(cookies)
         val hasBootstrapHtml =
             preferredBootstrapScore >= FireBootstrapHtmlHeuristics.REUSABLE_LOGIN_BOOTSTRAP_SCORE_THRESHOLD
+        // Align with fluxdo OAuth completion: username + session cookies are enough
+        // to finalize. Bootstrap HTML can be refreshed after cookie handoff.
         return FireLoginSyncReadiness(
-            isReady = normalizedUsername != null && hasAuthCookies && hasBootstrapHtml,
+            isReady = normalizedUsername != null && hasAuthCookies,
             username = normalizedUsername,
             hasAuthCookies = hasAuthCookies,
             hasBootstrapHtml = hasBootstrapHtml,

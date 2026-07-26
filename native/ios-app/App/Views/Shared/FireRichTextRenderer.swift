@@ -49,8 +49,10 @@ struct FireRichTextContent: Sendable {
 // MARK: - AttributedString Builder
 
 enum FireRichTextAttributedStringBuilder {
-    private static let quotePreviewLineLimit = 2
-    private static let quotePreviewCharacterLimit = 120
+    /// Compact preview only for Discourse reply-quotes that carry an author/floor.
+    /// Plain body blockquotes (common OP intro blocks) stay full-length like web.
+    private static let replyQuotePreviewLineLimit = 4
+    private static let replyQuotePreviewCharacterLimit = 220
 
     /// Convert parsed nodes into an NSAttributedString suitable for display.
     static func build(
@@ -251,6 +253,7 @@ enum FireRichTextAttributedStringBuilder {
                     context: context
                 )
                 result.append(quoteResult)
+                ensureBlockBoundary(result)
 
             case .quote(let author, let postNumber, let topicId, let children):
                 ensureBlockBoundary(result)
@@ -262,6 +265,7 @@ enum FireRichTextAttributedStringBuilder {
                     context: context
                 )
                 result.append(quoteResult)
+                ensureBlockBoundary(result)
 
             case .onebox(let url, let title, let description):
                 ensureBlockBoundary(result)
@@ -341,17 +345,42 @@ enum FireRichTextAttributedStringBuilder {
 
             case .divider:
                 ensureBlockBoundary(result)
+                // Thin hairline separator (avoid dashed ASCII which reads noisy).
+                let dividerStyle = NSMutableParagraphStyle()
+                dividerStyle.paragraphSpacingBefore = 10
+                dividerStyle.paragraphSpacing = 10
+                dividerStyle.maximumLineHeight = 1
+                dividerStyle.minimumLineHeight = 1
                 result.append(NSAttributedString(
-                    string: "----------",
-                    attributes: textAttributes(for: context.withTextColor(.separator))
+                    string: "\u{00A0}",
+                    attributes: [
+                        .font: UIFont.systemFont(ofSize: 1),
+                        .foregroundColor: UIColor.clear,
+                        .backgroundColor: UIColor.separator.withAlphaComponent(0.55),
+                        .paragraphStyle: dividerStyle,
+                    ]
                 ))
 
             case .lineBreak:
                 result.append(NSAttributedString(string: "\n"))
 
             case .paragraph(let children):
+                let start = result.length
                 ensureBlockBoundary(result)
                 appendNodes(children, to: result, context: context)
+                // Slightly airier block rhythm closer to Discourse web spacing.
+                if result.length > start {
+                    let style = NSMutableParagraphStyle()
+                    style.paragraphSpacing = 8
+                    style.paragraphSpacingBefore = 2
+                    style.lineSpacing = 2
+                    style.lineBreakMode = .byWordWrapping
+                    result.addAttribute(
+                        .paragraphStyle,
+                        value: style,
+                        range: NSRange(location: start, length: result.length - start)
+                    )
+                }
 
             case .image:
                 break // Handled separately via imageAttachments
@@ -573,6 +602,8 @@ enum FireRichTextAttributedStringBuilder {
         context: RenderContext
     ) -> NSAttributedString {
         let content = NSMutableAttributedString()
+        let isReplyQuote = !(author?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || postNumber != nil
 
         if let header = quoteHeaderAttributedString(
             author: author,
@@ -587,44 +618,101 @@ enum FireRichTextAttributedStringBuilder {
         }
 
         let body = NSMutableAttributedString()
-        appendNodes(
-            children,
-            to: body,
-            context: context.indented().withTextColor(.secondaryLabel)
-        )
-        content.append(compactQuoteBody(body))
+        // Body blockquotes should read like surrounding post text (web Discourse),
+        // while reply-quotes stay slightly de-emphasized.
+        let bodyContext = isReplyQuote
+            ? context.indented().withTextColor(.secondaryLabel)
+            : context.withTextColor(context.textColor)
+        appendNodes(children, to: body, context: bodyContext)
+        if isReplyQuote {
+            content.append(compactReplyQuoteBody(body))
+        } else {
+            content.append(fullBlockquoteBody(body))
+        }
 
         guard content.length > 0 else {
             return content
         }
 
+        // Discourse-like filled panel — stronger than canvas so the block reads clearly.
+        let fill = UIColor { traits in
+            if traits.userInterfaceStyle == .dark {
+                return UIColor(red: 0.16, green: 0.17, blue: 0.19, alpha: 1)
+            }
+            return UIColor(red: 0.90, green: 0.91, blue: 0.93, alpha: 1) // #E6E8ED
+        }
+        let stripe = UIColor { traits in
+            if traits.userInterfaceStyle == .dark {
+                return UIColor(white: 0.42, alpha: 1)
+            }
+            return UIColor(red: 0.68, green: 0.71, blue: 0.76, alpha: 1)
+        }
+
+        // Include vertical padding in layout height (CALayer pad alone gets clipped).
+        let padded = NSMutableAttributedString()
+        padded.append(quotePaddingLine())
+        padded.append(content)
+        padded.append(quotePaddingLine())
+
         let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacing = 8
-        paragraph.paragraphSpacingBefore = 4
-        paragraph.lineSpacing = 1.5
-        paragraph.headIndent = 10
-        paragraph.firstLineHeadIndent = 10
-        paragraph.tailIndent = -10
-        content.addAttributes(
+        paragraph.paragraphSpacing = 0
+        paragraph.paragraphSpacingBefore = 0
+        paragraph.lineSpacing = 3
+        paragraph.headIndent = 16
+        paragraph.firstLineHeadIndent = 16
+        paragraph.tailIndent = -12
+        paragraph.lineBreakMode = .byWordWrapping
+
+        padded.addAttributes(
             [
                 .paragraphStyle: paragraph,
-                .backgroundColor: UIColor.secondarySystemBackground,
                 .fireQuotePreviewBlock: true,
-                .fireQuotePreviewBackgroundColor: UIColor.secondarySystemBackground,
-                .fireQuotePreviewStripeColor: UIColor.tertiaryLabel,
+                .fireQuotePreviewBackgroundColor: fill,
+                .fireQuotePreviewStripeColor: stripe,
             ],
-            range: NSRange(location: 0, length: content.length)
+            range: NSRange(location: 0, length: padded.length)
         )
-        return content
+        return padded
     }
 
-    private static func compactQuoteBody(_ body: NSAttributedString) -> NSAttributedString {
+    private static func quotePaddingLine() -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = 10
+        style.maximumLineHeight = 10
+        return NSAttributedString(
+            string: "\u{200B}\n",
+            attributes: [
+                .font: UIFont.systemFont(ofSize: 1),
+                .foregroundColor: UIColor.clear,
+                .paragraphStyle: style,
+            ]
+        )
+    }
+
+    private static func fullBlockquoteBody(_ body: NSAttributedString) -> NSAttributedString {
+        let result = NSMutableAttributedString(attributedString: body)
+        // Collapse excessive blank lines inside the quote without truncating content.
+        collapseExcessiveBlankLines(in: result)
+        if result.length > 0 {
+            let font = UIFont.preferredFont(forTextStyle: .body)
+            result.addAttributes(
+                [
+                    .font: font,
+                    .foregroundColor: UIColor.label.withAlphaComponent(0.88),
+                ],
+                range: NSRange(location: 0, length: result.length)
+            )
+        }
+        return result
+    }
+
+    private static func compactReplyQuoteBody(_ body: NSAttributedString) -> NSAttributedString {
         let compact = NSMutableAttributedString()
         let source = body.string as NSString
         let ranges = nonBlankLineRanges(in: source)
         let selectedRanges = ranges.isEmpty
             ? trimmedRange(in: source, range: NSRange(location: 0, length: source.length)).map { [$0] } ?? []
-            : Array(ranges.prefix(quotePreviewLineLimit))
+            : Array(ranges.prefix(replyQuotePreviewLineLimit))
 
         for (index, range) in selectedRanges.enumerated() {
             if index > 0 {
@@ -637,13 +725,23 @@ enum FireRichTextAttributedStringBuilder {
         if compact.length > 0 {
             compact.addAttributes(
                 [
-                    .font: UIFont.preferredFont(forTextStyle: .footnote),
+                    .font: UIFont.preferredFont(forTextStyle: .subheadline),
                     .foregroundColor: UIColor.secondaryLabel,
                 ],
                 range: NSRange(location: 0, length: compact.length)
             )
         }
         return compact
+    }
+
+    private static func collapseExcessiveBlankLines(in body: NSMutableAttributedString) {
+        var text = body.string as NSString
+        while text.contains("\n\n\n") {
+            let range = text.range(of: "\n\n\n")
+            guard range.location != NSNotFound else { break }
+            body.replaceCharacters(in: range, with: "\n\n")
+            text = body.string as NSString
+        }
     }
 
     private static func nonBlankLineRanges(in source: NSString) -> [NSRange] {
@@ -687,8 +785,8 @@ enum FireRichTextAttributedStringBuilder {
     }
 
     private static func truncateQuoteBody(_ body: NSMutableAttributedString) {
-        let maxLength = quotePreviewCharacterLimit
-        let ellipsis = "..."
+        let maxLength = replyQuotePreviewCharacterLimit
+        let ellipsis = "…"
         guard body.length > maxLength else {
             return
         }
@@ -960,10 +1058,14 @@ class FireRichTextTextView: UITextView {
             effectiveRange: nil
         ) as? UIColor ?? .tertiaryLabel
 
-        let backgroundRect = unionRect
-            .insetBy(dx: 0, dy: -6)
-            .intersection(bounds.insetBy(dx: 0, dy: -2))
-        guard !backgroundRect.isNull else {
+        // Background tracks layout glyphs (padding lines already baked into text).
+        let backgroundRect = CGRect(
+            x: textContainerInset.left,
+            y: unionRect.minY - 2,
+            width: max(bounds.width - textContainerInset.left - textContainerInset.right, 1),
+            height: unionRect.height + 4
+        ).intersection(bounds.insetBy(dx: 0, dy: -2))
+        guard !backgroundRect.isNull, backgroundRect.height > 1 else {
             return
         }
 
@@ -976,17 +1078,18 @@ class FireRichTextTextView: UITextView {
         layer.insertSublayer(backgroundLayer, at: 0)
         quotePreviewLayers.append(backgroundLayer)
 
+        // Left accent bar (blockquote border-left).
         let stripeRect = CGRect(
             x: backgroundRect.minX + 8,
             y: backgroundRect.minY + 8,
-            width: 3,
+            width: 4,
             height: max(backgroundRect.height - 16, 1)
         )
         let stripeLayer = CAShapeLayer()
         stripeLayer.fillColor = stripeColor.resolvedColor(with: traitCollection).cgColor
         stripeLayer.path = UIBezierPath(
             roundedRect: stripeRect,
-            cornerRadius: 1.5
+            cornerRadius: 2
         ).cgPath
         layer.insertSublayer(stripeLayer, above: backgroundLayer)
         quotePreviewLayers.append(stripeLayer)

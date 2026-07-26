@@ -158,6 +158,9 @@ fn non_empty_string(value: impl AsRef<str>) -> Option<String> {
 fn looks_like_cloudflare_challenge(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
     lower.contains("cf_chl_opt")
+        || lower.contains("cf-turnstile")
+        || lower.contains("challenge-running")
+        || lower.contains("challenge-stage")
         || (lower.contains("challenge-platform") && lower.contains("cloudflare"))
         || (lower.contains("just a moment") && lower.contains("cloudflare"))
         || lower.contains("cf-mitigated")
@@ -190,7 +193,7 @@ impl FireCore {
                 .is_some_and(|value| !value.trim().is_empty()),
             "completing cloudflare challenge via platform cookie sync"
         );
-        self.update_session_advancing_epoch_if_auth_changed(
+        let snapshot = self.update_session_advancing_epoch_if_auth_changed(
             "complete cloudflare challenge",
             FireAuthChangeSource::PlatformSync,
             |session| {
@@ -215,7 +218,11 @@ impl FireCore {
                     "applied cloudflare challenge result"
                 );
             },
-        )
+        );
+        // Manual + network completion share the same post-challenge rebuild
+        // (resolved generation, bootstrap, app-state batch, platform bus).
+        self.schedule_post_challenge_session_rebuild();
+        snapshot
     }
 
     pub fn merge_platform_cookies(&self, cookies: Vec<PlatformCookie>) -> SessionSnapshot {
@@ -737,6 +744,14 @@ impl FireCore {
     }
 }
 
+fn is_cloudflare_related_cookie_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower == "cf_clearance"
+        || lower == "_cfuvid"
+        || lower.starts_with("cf_")
+        || lower.starts_with("__cf")
+}
+
 fn filter_cloudflare_challenge_cookies(
     cookies: Vec<PlatformCookie>,
     fresh_cf_clearance: Option<&str>,
@@ -745,9 +760,14 @@ fn filter_cloudflare_challenge_cookies(
     let fresh_cf_clearance = fresh_cf_clearance
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    // Challenge completion must never rewrite Discourse identity cookies.
+    // Only CF edge cookies flow WV → jar on this path (fluxdo excludes auth).
     let mut filtered = cookies
         .into_iter()
         .filter(|cookie| {
+            if !is_cloudflare_related_cookie_name(&cookie.name) {
+                return false;
+            }
             if cookie.name.eq_ignore_ascii_case("cf_clearance") {
                 return fresh_cf_clearance.is_some_and(|fresh| cookie.value.trim() == fresh);
             }

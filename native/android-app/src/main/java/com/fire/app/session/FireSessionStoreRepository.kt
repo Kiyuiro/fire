@@ -38,10 +38,15 @@ object FireSessionStoreRepository {
                     )
                 }
                 challengeHandler?.let(store::registerCloudflareChallengeHandler)
+                store.registerCloudflareClearanceResolvedHandler(FireClearanceResolvedRepository)
                 if (cookieSelfHealingHandler == null) {
                     cookieSelfHealingHandler = FireCookieSelfHealingRuntimeHandler(store)
                 }
                 cookieSelfHealingHandler?.let(store::registerCookieSelfHealingHandler)
+                val refresh = FireCfClearanceRefreshService.get(context.applicationContext)
+                refresh.bind(store)
+                // snapshot() is suspend; callers (e.g. MainActivity / login) update
+                // the refresh service after awaiting get() on a coroutine path.
                 shared = store
                 Log.d(TAG, "session store get cold_create=true session_store_get_ms=${SystemClock.elapsedRealtime() - startedAt}")
             }

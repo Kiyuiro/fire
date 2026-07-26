@@ -293,6 +293,7 @@ protocol FireLoginSessionStoring: Sendable {
         _ captured: FireCapturedLoginState,
         allowLowConfidenceSessionCookies: Bool
     ) async throws -> LoginFinalizationResultState
+    func finalizeLoginReady() async throws -> SessionState
     func syncLoginContext(_ captured: FireCapturedLoginState) async throws -> SessionState
     func refreshBootstrapIfNeeded() async throws -> SessionState
     func refreshCsrfTokenIfNeeded() async throws -> SessionState
@@ -357,6 +358,8 @@ public final class FireWebViewLoginCoordinator {
         guard readiness.isReady else {
             throw FireWebViewLoginCoordinatorError.loginSyncNotReady(readiness)
         }
+        // Prefer current-page bootstrap when present; otherwise finalize cookies
+        // first and let refreshBootstrapIfNeeded hydrate site metadata.
         return try await completeLogin(captured)
     }
 
@@ -367,11 +370,14 @@ public final class FireWebViewLoginCoordinator {
             captured,
             allowLowConfidenceSessionCookies: false
         )
-        if finalized.session.loginPhase == .ready {
+        let hasAuthCookies = finalized.session.readiness.hasLoginCookie
+            || !(finalized.session.cookies.tToken?.isEmpty ?? true)
+        guard finalized.success || hasAuthCookies else {
             return finalized.session
         }
-
-        return try await sessionStore.refreshBootstrapIfNeeded()
+        // fluxdo LoginReady: bootstrap with timeout, never block home entry once
+        // auth cookies are present.
+        return try await sessionStore.finalizeLoginReady()
     }
 
     public func captureJsLoginState(
@@ -925,8 +931,11 @@ public final class FireWebViewLoginCoordinator {
         let hasBootstrapHTML =
             preferredBootstrapScore >= FireBootstrapHTMLHeuristics.reusableLoginBootstrapScoreThreshold
 
+        // Align with fluxdo WebView OAuth completion:
+        // username + session cookies are enough to finalize. Bootstrap HTML is
+        // preferred but can be refreshed over HTTP after cookie handoff.
         return FireLoginSyncReadiness(
-            isReady: hasUsername && hasAuthCookies && hasBootstrapHTML,
+            isReady: hasUsername && hasAuthCookies,
             username: normalizedUsername,
             hasAuthCookies: hasAuthCookies,
             hasBootstrapHTML: hasBootstrapHTML,

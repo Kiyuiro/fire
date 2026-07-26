@@ -417,6 +417,7 @@ final class FireTopicDetailFeedController: NSObject,
             let key = makeLayoutKey(
                 for: postContext,
                 canWriteInteractions: configuration.canWriteInteractions,
+                isReactionPickerExpanded: configuration.isReactionPickerExpanded(postContext.post.id),
                 trait: trait
             )
             layoutManager.enqueueCalculation(
@@ -459,6 +460,7 @@ final class FireTopicDetailFeedController: NSObject,
             let key = makeLayoutKey(
                 for: postContext,
                 canWriteInteractions: configuration.canWriteInteractions,
+                isReactionPickerExpanded: configuration.isReactionPickerExpanded(postContext.post.id),
                 trait: trait
             )
             guard publishedKeys.contains(key),
@@ -505,6 +507,7 @@ final class FireTopicDetailFeedController: NSObject,
             makeLayoutKey(
                 for: $0,
                 canWriteInteractions: configuration.canWriteInteractions,
+                isReactionPickerExpanded: configuration.isReactionPickerExpanded($0.post.id),
                 trait: capturedTrait
             )
         }
@@ -534,6 +537,8 @@ final class FireTopicDetailFeedController: NSObject,
                         showsDivider: postContext.showsDivider,
                         layoutWidth: capturedLayoutWidth,
                         boostAnimationsEnabled: capturedBoostAnimationsEnabled,
+                        isReactionPickerExpanded: capturedConfiguration.isReactionPickerExpanded(postContext.post.id),
+                        quickReactionOptions: capturedConfiguration.quickReactionOptions,
                         layout: capturedLayoutKey.flatMap { capturedLayoutManager?.cachedLayout(forKey: $0) },
                         layoutKey: capturedLayoutKey
                     ),
@@ -625,7 +630,11 @@ final class FireTopicDetailFeedController: NSObject,
             onOpenImage: configuration.onOpenImage,
             onToggleLike: configuration.onToggleLike,
             onSelectReaction: configuration.onSelectReaction,
-            onOpenReactionPicker: configuration.onOpenReactionPicker,
+            onToggleReactionPicker: configuration.onToggleReactionPicker,
+            onReplyPost: { post in
+                configuration.onOpenComposer(post)
+            },
+            onBoostPost: configuration.onBoostPost,
             onQuotePost: configuration.onQuotePost,
             onEditPost: configuration.onEditPost,
             onBookmarkPost: configuration.onBookmarkPost,
@@ -656,6 +665,7 @@ final class FireTopicDetailFeedController: NSObject,
         let layoutKey = makeLayoutKey(
             for: context,
             canWriteInteractions: configuration.canWriteInteractions,
+            isReactionPickerExpanded: configuration.isReactionPickerExpanded(context.post.id),
             trait: trait
         )
         node.configure(
@@ -675,6 +685,8 @@ final class FireTopicDetailFeedController: NSObject,
                 showsDivider: context.showsDivider,
                 layoutWidth: width,
                 boostAnimationsEnabled: !isScrollInteractionActive,
+                isReactionPickerExpanded: configuration.isReactionPickerExpanded(context.post.id),
+                quickReactionOptions: configuration.quickReactionOptions,
                 layout: layoutManager?.cachedLayout(forKey: layoutKey),
                 layoutKey: layoutKey
             ),
@@ -688,6 +700,7 @@ final class FireTopicDetailFeedController: NSObject,
     private func makeLayoutKey(
         for context: FireTopicDetailRuntimePostContext,
         canWriteInteractions: Bool,
+        isReactionPickerExpanded: Bool,
         trait: FirePostLayoutTraitSignature
     ) -> FirePostCellLayoutKey {
         let textContentID = [
@@ -730,6 +743,27 @@ final class FireTopicDetailFeedController: NSObject,
                     || post.canRecover
                     || (post.canDelete && !post.hidden)
             }(),
+            primaryActionSlotCount: {
+                guard context.allowsInlineOverflowActions else { return 0 }
+                let post = context.post
+                let canWrite = canWriteInteractions && !post.hidden
+                var slots = 0
+                if canWrite {
+                    slots += 2 // reply + react
+                    if post.canBoost {
+                        slots += 1
+                    }
+                }
+                let hasSecondary = canWrite
+                    || post.canEdit
+                    || post.canRecover
+                    || (post.canDelete && !post.hidden)
+                if hasSecondary {
+                    slots += 1 // overflow
+                }
+                return slots
+            }(),
+            isReactionPickerExpanded: isReactionPickerExpanded,
             textExpansionState: context.textExpansionState,
             acceptedAnswer: context.post.acceptedAnswer,
             hasAuthorMetadata: FirePostAuthorMetadataDisplay.hasVisibleMetadata(context.post),

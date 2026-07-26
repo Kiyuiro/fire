@@ -68,13 +68,18 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
     private let pollContainerNode = ASDisplayNode()
     private let boostContainerNode = ASDisplayNode()
     private let replyShortcutNode = ASButtonNode()
-    /// Collapsed-only control; expands quote/bookmark/flag/edit/react inline.
-    private let overflowNode = ASButtonNode()
+    /// Always-visible primary actions + overflow for secondary tools.
+    private let actionReplyNode = ASButtonNode()
     private let actionReactNode = ASButtonNode()
+    private let actionBoostNode = ASButtonNode()
+    private let overflowNode = ASButtonNode()
     private let actionQuoteNode = ASButtonNode()
     private let actionBookmarkNode = ASButtonNode()
     private let actionEditNode = ASButtonNode()
     private let actionFlagNode = ASButtonNode()
+    private let reactionPickerScrollNode = FireInlineReactionPickerScrollNode()
+    private var reactionPickerButtons: [ASButtonNode] = []
+    private var reactionPickerOptionIDs: [String] = []
     private var areOverflowActionsExpanded = false
     private var overflowCollapseWorkItem: DispatchWorkItem?
     private lazy var swipeReplyRevealLabel: UILabel = {
@@ -314,12 +319,15 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
         replyShortcutNode.fireBindPressBounce(.compact)
         replyShortcutNode.accessibilityLabel = "展开回复"
 
-        // Overflow cluster mirrors topic-detail toolbar: collapsed `...`, tap to
-        // slide quote/bookmark/flag(/edit/react) out inline, auto-collapse idle.
-        configureActionIcon(overflowNode, systemName: "ellipsis.circle", accessibilityLabel: "更多操作")
-        overflowNode.addTarget(self, action: #selector(handleOverflowTap), forControlEvents: .touchUpInside)
+        // Primary: reply / react / boost stay visible. Overflow expands secondary tools.
+        configureActionIcon(actionReplyNode, systemName: "arrowshape.turn.up.left", accessibilityLabel: "回复")
+        actionReplyNode.addTarget(self, action: #selector(handleActionReplyTap), forControlEvents: .touchUpInside)
         configureActionIcon(actionReactNode, systemName: "face.smiling", accessibilityLabel: "回应")
         actionReactNode.addTarget(self, action: #selector(handleActionReactTap), forControlEvents: .touchUpInside)
+        configureActionIcon(actionBoostNode, systemName: "bolt", accessibilityLabel: "Boost")
+        actionBoostNode.addTarget(self, action: #selector(handleActionBoostTap), forControlEvents: .touchUpInside)
+        configureActionIcon(overflowNode, systemName: "ellipsis.circle", accessibilityLabel: "更多操作")
+        overflowNode.addTarget(self, action: #selector(handleOverflowTap), forControlEvents: .touchUpInside)
         configureActionIcon(actionQuoteNode, systemName: "text.quote", accessibilityLabel: "引用回复")
         actionQuoteNode.addTarget(self, action: #selector(handleActionQuoteTap), forControlEvents: .touchUpInside)
         configureActionIcon(actionBookmarkNode, systemName: "bookmark", accessibilityLabel: "书签")
@@ -333,6 +341,7 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
         // Never touch `.view` here: setupNodes runs inside Texture node-blocks off-main.
         reactionContainerNode.isHidden = true
         reactionContainerNode.clipsToBounds = false
+        reactionPickerScrollNode.isHidden = true
 
         // Divider
         dividerNode.backgroundColor = .separator
@@ -399,6 +408,7 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
 
         configureReplyShortcut(payload: payload)
         configureOverflowActions(payload: payload)
+        configureReactionPicker(payload: payload)
         configureReactions(payload: payload)
         configureSearchHighlight(payload.isSearchHighlighted)
         configureDivider(shows: showsDivider)
@@ -960,9 +970,11 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
         let symbolName = expanded ? "bubble.left.fill" : "bubble.left"
         // Collapsed = muted; expanded thread = accent orange for icon AND count.
         let tint = expanded ? Self.accentTextColor : Self.tertiaryInkColor
-        let font = UIFont.preferredFont(forTextStyle: .caption1)
-        let symbolConfig = UIImage.SymbolConfiguration(font: font, scale: .small)
-            .applying(UIImage.SymbolConfiguration(weight: expanded ? .semibold : .regular))
+        // Same glyph size as reply/react/boost action icons (14pt medium).
+        let symbolConfig = UIImage.SymbolConfiguration(
+            pointSize: 14,
+            weight: expanded ? .semibold : .medium
+        )
         // Template + tintColor keeps SF Symbol color in sync with the count label
         // (alwaysOriginal dynamic UIColor can leave the glyph on the stale muted tint).
         if let image = UIImage(systemName: symbolName, withConfiguration: symbolConfig) {
@@ -976,7 +988,7 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
 
         let countText = payload.isLoadingReplyContext ? "…" : "\(count)"
         let countFont = UIFontMetrics(forTextStyle: .caption1).scaledFont(
-            for: .systemFont(ofSize: 12, weight: expanded ? .semibold : .medium)
+            for: .systemFont(ofSize: 13, weight: expanded ? .semibold : .medium)
         )
         let countAttributes: [NSAttributedString.Key: Any] = [
             .font: countFont,
@@ -994,8 +1006,17 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             string: countText,
             attributes: countAttributes
         ), for: .highlighted)
-        replyShortcutNode.contentSpacing = 3
+        replyShortcutNode.contentSpacing = 4
         replyShortcutNode.contentHorizontalAlignment = .middle
+        replyShortcutNode.contentVerticalAlignment = .center
+        // Match action-icon hit box height; width fits icon + count.
+        replyShortcutNode.style.minHeight = ASDimensionMake(
+            FirePostCellLayoutCalculator.replyShortcutHeight
+        )
+        replyShortcutNode.style.minWidth = ASDimensionMake(
+            FirePostCellLayoutCalculator.replyShortcutMinWidth
+        )
+        replyShortcutNode.hitTestSlop = UIEdgeInsets(top: -6, left: -6, bottom: -6, right: -6)
         replyShortcutNode.accessibilityLabel = expanded
             ? "收起 \(count) 条回复"
             : "展开 \(count) 条回复"
@@ -1004,14 +1025,31 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
     private func configureOverflowActions(payload: FirePostCellRenderPayload) {
         let canWrite = payload.canWriteInteractions && !payload.post.hidden
         let isMutating = payload.isMutating
-        let showsOverflow = payload.showsInlineActions
+        let showsChrome = payload.showsInlineActions
+        let canBoost = canWrite && payload.post.canBoost
+        let hasSecondary = canWrite
+            || payload.post.canEdit
+            || payload.post.canRecover
+            || (payload.post.canDelete && !payload.post.hidden)
+
+        // Primary actions stay visible so reply/react/boost are not buried under `...`.
+        setActionVisible(actionReplyNode, visible: showsChrome && canWrite, enabled: canWrite && !isMutating)
+        setActionVisible(actionReactNode, visible: showsChrome && canWrite, enabled: canWrite && !isMutating)
+        setActionVisible(actionBoostNode, visible: showsChrome && canBoost, enabled: canBoost && !isMutating)
+        applyActionSymbol(actionBoostNode, systemName: "bolt", highlighted: false)
+
+        let showsOverflow = showsChrome && hasSecondary
         overflowNode.isHidden = !showsOverflow
         overflowNode.isEnabled = showsOverflow && !isMutating
+        applyActionSymbol(
+            actionReactNode,
+            systemName: "face.smiling",
+            highlighted: payload.isReactionPickerExpanded
+        )
         applyActionSymbol(overflowNode, systemName: "ellipsis.circle", highlighted: areOverflowActionsExpanded)
 
         let expanded = showsOverflow && areOverflowActionsExpanded
 
-        setActionVisible(actionReactNode, visible: expanded && canWrite, enabled: canWrite && !isMutating)
         setActionVisible(actionQuoteNode, visible: expanded && canWrite, enabled: canWrite && !isMutating)
 
         let bookmarked = payload.post.bookmarked
@@ -1081,6 +1119,70 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             }
             view.setAnimationsEnabled(enabled)
         }
+    }
+
+    private func configureReactionPicker(payload: FirePostCellRenderPayload) {
+        let options = payload.quickReactionOptions
+        let expanded = payload.isReactionPickerExpanded
+            && payload.canWriteInteractions
+            && !payload.post.hidden
+            && !options.isEmpty
+
+        guard expanded else {
+            reactionPickerScrollNode.isHidden = true
+            reactionPickerScrollNode.buttons = []
+            if !reactionPickerButtons.isEmpty {
+                reactionPickerButtons.removeAll()
+                reactionPickerOptionIDs = []
+            }
+            return
+        }
+
+        reactionPickerScrollNode.isHidden = false
+        let nextIDs = options.map(\.id)
+        if reactionPickerOptionIDs != nextIDs {
+            reactionPickerButtons.removeAll()
+            reactionPickerOptionIDs = nextIDs
+            for option in options {
+                let button = ASButtonNode()
+                button.fireBindPressBounce(.chip)
+                button.accessibilityLabel = option.label
+                button.addTarget(self, action: #selector(handleQuickReactionTap(_:)), forControlEvents: .touchUpInside)
+                reactionPickerButtons.append(button)
+            }
+        }
+
+        let buttonSize = FirePostCellLayoutCalculator.reactionPickerButtonSize
+        for (button, option) in zip(reactionPickerButtons, options) {
+            let selected = payload.post.currentUserReaction?.id
+                .caseInsensitiveCompare(option.id) == .orderedSame
+            let title = NSAttributedString(
+                string: option.symbol,
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 20),
+                ]
+            )
+            button.setAttributedTitle(title, for: .normal)
+            button.backgroundColor = selected
+                ? Self.accentTextColor.withAlphaComponent(0.16)
+                : Self.reactionIdleFillColor
+            button.borderColor = (selected ? Self.accentTextColor : Self.reactionIdleBorderColor).cgColor
+            button.borderWidth = FirePostCellLayoutCalculator.reactionChipBorderWidth
+            button.cornerRadius = buttonSize.height / 2
+            button.contentEdgeInsets = .zero
+            button.isEnabled = payload.canWriteInteractions
+                && (payload.post.currentUserReaction?.canUndo ?? true)
+            button.style.preferredSize = buttonSize
+            button.style.flexGrow = 0
+            button.style.flexShrink = 0
+        }
+
+        reactionPickerScrollNode.buttons = reactionPickerButtons
+        reactionPickerScrollNode.style.preferredSize = CGSize(
+            width: max(payload.layoutWidth - FirePostCellLayoutCalculator.outerHorizontalPadding * 2, 1),
+            height: FirePostCellLayoutCalculator.reactionPickerStripHeight
+        )
+        reactionPickerScrollNode.setNeedsLayout()
     }
 
     private func configureReactions(payload: FirePostCellRenderPayload) {
@@ -1364,43 +1466,10 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             }
         }
 
-        let reactionRow: ASStackLayoutSpec?
-        if !reactionContainerNode.isHidden && !reactionButtons.isEmpty {
-            let allowsWrap = FirePostReactionDisplayPolicy.allowsWrapping(depth: currentDepth)
-            // Bottom inset creates cross-axis gap between wrapped lines (ASStack has no lineSpacing).
-            let reactionChildren: [ASLayoutElement] = allowsWrap
-                ? reactionButtons.map { button in
-                    ASInsetLayoutSpec(
-                        insets: UIEdgeInsets(
-                            top: 0,
-                            left: 0,
-                            bottom: FirePostCellLayoutCalculator.reactionChipLineSpacing,
-                            right: 0
-                        ),
-                        child: button
-                    )
-                }
-                : reactionButtons
-            let row = ASStackLayoutSpec(
-                direction: .horizontal,
-                spacing: FirePostCellLayoutCalculator.reactionChipHorizontalSpacing,
-                justifyContent: .start,
-                alignItems: .start,
-                children: reactionChildren
-            )
-            if allowsWrap {
-                row.flexWrap = .wrap
-                row.alignContent = .start
-                row.style.flexGrow = 1.0
-            }
-            row.style.flexShrink = 1.0
-            reactionRow = row
-        } else {
-            reactionRow = nil
-        }
-
-        // Footer chrome (mirrors top toolbar, mirrored direction):
-        // [bubble?] [...] [quote bookmark … → expands right]   ……   [reactions]
+        // Footer chrome:
+        // [bubble?] [reply react boost ...]
+        // [quick reaction strip when expanded]
+        // [existing reaction chips full width]
         var actionRowChildren: [ASLayoutElement] = []
         if !replyShortcutNode.isHidden {
             replyShortcutNode.style.flexGrow = 0
@@ -1408,39 +1477,28 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             actionRowChildren.append(replyShortcutNode)
         }
 
-        if !overflowNode.isHidden {
-            overflowNode.style.flexGrow = 0
-            overflowNode.style.flexShrink = 0
-            actionRowChildren.append(overflowNode)
+        let primaryCluster = [
+            actionReplyNode,
+            actionReactNode,
+            actionBoostNode,
+            overflowNode,
+        ].filter { !$0.isHidden }
+        for node in primaryCluster {
+            node.style.flexGrow = 0
+            node.style.flexShrink = 0
+            actionRowChildren.append(node)
         }
 
-        // Expand to the right of `...` (top bar expands left of its trailing control).
         let overflowCluster = [
             actionQuoteNode,
             actionBookmarkNode,
             actionFlagNode,
             actionEditNode,
-            actionReactNode,
         ].filter { !$0.isHidden }
         actionRowChildren.append(contentsOf: overflowCluster)
 
-        if let reactionRow {
-            let trailingSpacer = ASLayoutSpec()
-            trailingSpacer.style.flexGrow = 1.0
-            actionRowChildren.append(trailingSpacer)
-            actionRowChildren.append(reactionRow)
-        }
-
-        let actionElement: ASLayoutElement?
-        if FirePostReactionDisplayPolicy.allowsWrapping(depth: currentDepth),
-           replyShortcutNode.isHidden,
-           overflowNode.isHidden,
-           overflowCluster.isEmpty,
-           let reactionRow {
-            reactionRow.style.minWidth = ASDimensionMake(max(bodyAvailableWidth, 1))
-            reactionRow.style.maxWidth = ASDimensionMake(max(bodyAvailableWidth, 1))
-            actionElement = reactionRow
-        } else if !actionRowChildren.isEmpty {
+        var footerChildren: [ASLayoutElement] = []
+        if !actionRowChildren.isEmpty {
             let actionRow = ASStackLayoutSpec(
                 direction: .horizontal,
                 spacing: FirePostCellLayoutCalculator.actionIconSpacing,
@@ -1450,9 +1508,50 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             )
             actionRow.style.flexShrink = 1.0
             actionRow.style.minHeight = ASDimensionMake(FirePostCellLayoutCalculator.actionRowHeight)
-            actionElement = actionRow
-        } else {
+            footerChildren.append(actionRow)
+        }
+
+        if !reactionPickerScrollNode.isHidden, !reactionPickerButtons.isEmpty {
+            reactionPickerScrollNode.style.flexGrow = 1
+            reactionPickerScrollNode.style.flexShrink = 1
+            reactionPickerScrollNode.style.minHeight = ASDimensionMake(
+                FirePostCellLayoutCalculator.reactionPickerStripHeight
+            )
+            reactionPickerScrollNode.style.maxHeight = ASDimensionMake(
+                FirePostCellLayoutCalculator.reactionPickerStripHeight
+            )
+            footerChildren.append(reactionPickerScrollNode)
+        }
+
+        if !reactionContainerNode.isHidden, !reactionButtons.isEmpty {
+            let reactionRow = ASStackLayoutSpec(
+                direction: .horizontal,
+                spacing: FirePostCellLayoutCalculator.reactionChipHorizontalSpacing,
+                justifyContent: .start,
+                alignItems: .center,
+                children: reactionButtons
+            )
+            reactionRow.style.flexShrink = 1.0
+            reactionRow.style.minHeight = ASDimensionMake(
+                FirePostCellLayoutCalculator.reactionChipHeight
+            )
+            footerChildren.append(reactionRow)
+        }
+
+        let actionElement: ASLayoutElement?
+        if footerChildren.isEmpty {
             actionElement = nil
+        } else if footerChildren.count == 1 {
+            actionElement = footerChildren[0]
+        } else {
+            let stack = ASStackLayoutSpec(
+                direction: .vertical,
+                spacing: FirePostCellLayoutCalculator.reactionTopSpacing,
+                justifyContent: .start,
+                alignItems: .stretch,
+                children: footerChildren
+            )
+            actionElement = stack
         }
 
         let boostElement: ASLayoutElement? = !shouldSuppressAttachments && !boostContainerNode.isHidden
@@ -1588,11 +1687,34 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
         }
     }
 
+    @objc private func handleActionReplyTap() {
+        guard let payload = currentPayload, let callbacks = currentCallbacks else { return }
+        FireMotionHaptics.impact(.light)
+        callbacks.onReplyPost(payload.post)
+    }
+
     @objc private func handleActionReactTap() {
         guard let payload = currentPayload, let callbacks = currentCallbacks else { return }
-        noteOverflowInteraction()
         FireMotionHaptics.impact(.light)
-        callbacks.onOpenReactionPicker(payload.post)
+        callbacks.onToggleReactionPicker(payload.post)
+    }
+
+    @objc private func handleQuickReactionTap(_ sender: ASButtonNode) {
+        guard let payload = currentPayload,
+              let callbacks = currentCallbacks,
+              let index = reactionPickerButtons.firstIndex(where: { $0 === sender }),
+              index < payload.quickReactionOptions.count else {
+            return
+        }
+        let option = payload.quickReactionOptions[index]
+        FireMotionHaptics.selection()
+        callbacks.onSelectReaction(payload.post, option.id)
+    }
+
+    @objc private func handleActionBoostTap() {
+        guard let payload = currentPayload, let callbacks = currentCallbacks else { return }
+        FireMotionHaptics.impact(.light)
+        callbacks.onBoostPost(payload.post)
     }
 
     @objc private func handleActionQuoteTap() {
@@ -1650,7 +1772,6 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             actionBookmarkNode,
             actionFlagNode,
             actionEditNode,
-            actionReactNode,
         ]
 
         let applyConfig = { [weak self] in
@@ -1813,13 +1934,14 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
         }
 
         let translation = gestureRecognizer.translation(in: view)
-        let progress = max(0, min(translation.x / Self.replySwipeTriggerThreshold, 1.6))
+        // Left swipe (negative x) opens reply — avoids fighting the nav-edge pop gesture.
+        let slideDistance = min(max(-translation.x, 0), 72)
+        let progress = max(0, min(slideDistance / Self.replySwipeTriggerThreshold, 1.6))
 
         switch gestureRecognizer.state {
         case .began, .changed:
-            // WeChat-style: content slides right and a reply cue peeks in from the left.
-            let offset = min(max(translation.x, 0), 72)
-            view.transform = CGAffineTransform(translationX: offset, y: 0)
+            // Content slides left; reply cue peeks in from the trailing edge.
+            view.transform = CGAffineTransform(translationX: -slideDistance, y: 0)
             if swipeReplyRevealLabel.superview == nil {
                 view.addSubview(swipeReplyRevealLabel)
             }
@@ -1827,12 +1949,12 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             swipeReplyRevealLabel.alpha = min(progress, 1)
             swipeReplyRevealLabel.sizeToFit()
             swipeReplyRevealLabel.center = CGPoint(
-                x: 12 + swipeReplyRevealLabel.bounds.width / 2 - offset,
+                x: bounds.width - 12 - swipeReplyRevealLabel.bounds.width / 2 + slideDistance,
                 y: bounds.midY
             )
 
         case .ended, .cancelled, .failed:
-            let shouldReply = translation.x > Self.replySwipeTriggerThreshold
+            let shouldReply = translation.x < -Self.replySwipeTriggerThreshold
                 && abs(translation.x) > abs(translation.y)
             resetSwipeReplyReveal(animated: true)
             if shouldReply, let callbacks = currentCallbacks {
@@ -1860,9 +1982,17 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
             })
         }
         if payload.canWriteInteractions && !post.hidden {
-            alert.addAction(UIAlertAction(title: "回应", style: .default) { _ in
-                callbacks.onOpenReactionPicker(post)
+            alert.addAction(UIAlertAction(title: "回复", style: .default) { _ in
+                callbacks.onReplyPost(post)
             })
+            alert.addAction(UIAlertAction(title: "回应", style: .default) { _ in
+                callbacks.onToggleReactionPicker(post)
+            })
+            if post.canBoost {
+                alert.addAction(UIAlertAction(title: "Boost", style: .default) { _ in
+                    callbacks.onBoostPost(post)
+                })
+            }
             alert.addAction(UIAlertAction(title: "引用回复", style: .default) { _ in
                 callbacks.onQuotePost(post)
             })
@@ -1932,8 +2062,8 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
         let horizontalMovement = max(abs(translation.x), abs(velocity.x))
         let verticalMovement = max(abs(translation.y), abs(velocity.y))
 
-        return translation.x > 0
-            && velocity.x >= 0
+        return translation.x < 0
+            && velocity.x <= 0
             && horizontalMovement > verticalMovement * 1.15
     }
 
@@ -1969,6 +2099,26 @@ final class FirePostCellNode: ASCellNode, UIGestureRecognizerDelegate {
 
         var interactionActions: [UIAction] = []
         if canWrite && !post.hidden {
+            let reply = UIAction(title: "回复", image: UIImage(systemName: "arrowshape.turn.up.left")) { _ in
+                callbacks.onReplyPost(post)
+            }
+            reply.attributes = isMutating ? .disabled : []
+            interactionActions.append(reply)
+
+            let react = UIAction(title: "回应", image: UIImage(systemName: "face.smiling")) { _ in
+                callbacks.onToggleReactionPicker(post)
+            }
+            react.attributes = isMutating ? .disabled : []
+            interactionActions.append(react)
+
+            if post.canBoost {
+                let boost = UIAction(title: "Boost", image: UIImage(systemName: "bolt")) { _ in
+                    callbacks.onBoostPost(post)
+                }
+                boost.attributes = isMutating ? .disabled : []
+                interactionActions.append(boost)
+            }
+
             let quote = UIAction(title: "引用回复", image: UIImage(systemName: "text.quote")) { _ in
                 callbacks.onQuotePost(post)
             }
@@ -3331,5 +3481,45 @@ private final class RichTextNodeLinkDelegate: NSObject, ASTextNodeDelegate {
 
     func textNodeTappedTruncationToken(_ textNode: ASTextNode) {
         onTruncation()
+    }
+}
+
+/// Horizontal scroller for the inline quick-reaction strip so narrow devices
+/// never clip trailing emoji buttons.
+private final class FireInlineReactionPickerScrollNode: ASScrollNode {
+    var buttons: [ASButtonNode] = [] {
+        didSet { setNeedsLayout() }
+    }
+
+    override init() {
+        super.init()
+        automaticallyManagesSubnodes = true
+        automaticallyManagesContentSize = true
+        scrollableDirections = [.left, .right]
+    }
+
+    override func didLoad() {
+        super.didLoad()
+        view.showsHorizontalScrollIndicator = false
+        view.showsVerticalScrollIndicator = false
+        view.alwaysBounceHorizontal = true
+        view.alwaysBounceVertical = false
+        view.clipsToBounds = true
+        view.contentInsetAdjustmentBehavior = .never
+    }
+
+    override func layoutSpecThatFits(_ constrainedSize: ASSizeRange) -> ASLayoutSpec {
+        let row = ASStackLayoutSpec(
+            direction: .horizontal,
+            spacing: FirePostCellLayoutCalculator.reactionPickerButtonSpacing,
+            justifyContent: .start,
+            alignItems: .center,
+            children: buttons
+        )
+        // Keep vertical centering inside the strip height.
+        return ASInsetLayoutSpec(
+            insets: UIEdgeInsets(top: 2, left: 0, bottom: 2, right: 8),
+            child: row
+        )
     }
 }

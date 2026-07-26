@@ -127,9 +127,21 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
         },
         onSelectReaction: { [weak self] post, reactionID in
             self?.toggleReaction(reactionID, for: post)
+            self?.collapseReactionPicker(animatedSnapshot: true)
         },
-        onOpenReactionPicker: { [weak self] post in
-            self?.presentReactionPicker(for: post)
+        onToggleReactionPicker: { [weak self] post in
+            self?.toggleReactionPicker(for: post)
+        },
+        onBoostPost: { [weak self] post in
+            self?.openBoostComposer(for: post)
+        },
+        quickReactionOptionsProvider: { [weak self] in
+            FireTopicPresentation.quickReactionOptions(
+                from: self?.viewModel.session.bootstrap.enabledReactionIds ?? []
+            )
+        },
+        isReactionPickerExpanded: { [weak self] postID in
+            self?.expandedReactionPickerPostIDs.contains(postID) ?? false
         },
         onQuotePost: { [weak self] post in
             self?.openQuoteComposer(for: post)
@@ -185,6 +197,9 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
 
     private var expandedPostTextIDs: Set<UInt64> = []
     private var expandedReplyRootPostIDs: Set<UInt64> = []
+    private var expandedReactionPickerPostIDs: Set<UInt64> = []
+    private var reactionPickerCollapseWorkItem: DispatchWorkItem?
+    private var didAttemptReactionPickerCoachmark = false
     private var isTopicAiSummaryExpanded = false
     private var composerContext: FireReplyComposerContext?
     private var replyDraft = ""
@@ -481,7 +496,19 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
                 self?.submitQuickReply()
             },
             onOpenAdvancedComposer: { [weak self] in
-                self?.openAdvancedComposer()
+                guard let self else { return }
+                // Boost stays in the bottom bar; advanced composer is reply-only.
+                if self.composerContext?.isBoost == true {
+                    self.composerContext = FireReplyComposerContext(
+                        topicId: self.topic.id,
+                        postId: self.composerContext?.postId,
+                        replyToPostNumber: self.composerContext?.replyToPostNumber,
+                        replyToUsername: self.composerContext?.replyToUsername,
+                        kind: .reply
+                    )
+                    self.buildAndApplyChromeState()
+                }
+                self.openAdvancedComposer()
             },
             onClearTarget: { [weak self] in
                 self?.clearComposerTarget()
@@ -791,9 +818,11 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
     }
 
     private func subscribeToKeyboardNotifications() {
+        // Deliver synchronously on the posting thread (main). Do not hop through
+        // RunLoop.main / DispatchQueue.main — that defers handling by a turn and
+        // makes the quick-reply bar lag behind the keyboard after swipe-to-reply.
         NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)
             .merge(with: NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification))
-            .receive(on: RunLoop.main)
             .sink { [weak self] notification in
                 self?.handleKeyboardNotification(notification)
             }
@@ -862,7 +891,8 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
             mutatingPostIDs: topicDetailStore.mutatingPostIDs,
             loadingPostReplyContextIDs: topicDetailStore.loadingPostReplyContextIDs,
             expandedPostTextIDs: expandedPostTextIDs,
-            expandedReplyRootPostIDs: expandedReplyRootPostIDs
+            expandedReplyRootPostIDs: expandedReplyRootPostIDs,
+            expandedReactionPickerPostIDs: expandedReactionPickerPostIDs
         )
     }
 
@@ -918,7 +948,8 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
                 currentUsername: state.route.currentUsername ?? "",
                 baseURLString: state.route.baseURLString,
                 activeSearchPostID: activeTopicSearchMatch?.postID,
-                expandedReplyRootPostIDs: state.interaction.expandedReplyRootPostIDs
+                expandedReplyRootPostIDs: state.interaction.expandedReplyRootPostIDs,
+                expandedReactionPickerPostIDs: state.interaction.expandedReactionPickerPostIDs
             )),
             interactions: runtimeInteractions
         )
@@ -1108,6 +1139,8 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
                 .doubleValue ?? 0.25
             let curveRawValue = (notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?
                 .uintValue ?? UInt(UIView.AnimationCurve.easeInOut.rawValue)
+            // Keyboard uses a private curve (rawValue 7). Shift into
+            // UIView.AnimationOptions so the bar tracks the system animation.
             let options = UIView.AnimationOptions(rawValue: curveRawValue << 16)
             UIView.animate(
                 withDuration: duration,
@@ -1117,6 +1150,8 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
                 self.view.layoutIfNeeded()
             }
         }
+        // Non-keyboard geometry commits on the next layout pass, or via an
+        // explicit layoutIfNeeded() in presentQuickReplyInput() before focus.
     }
 
     private var currentSearchBarHeight: CGFloat {
@@ -1141,6 +1176,7 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
             topicId: topic.id,
             visiblePostNumbers: visiblePostNumbers
         )
+        maybePresentReactionPickerCoachmark(visiblePostNumbers: visiblePostNumbers)
     }
 
     private func handleRichTextLink(_ url: URL) {
@@ -1187,11 +1223,117 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
             topicId: topic.id,
             postId: replyToPost?.id,
             replyToPostNumber: replyToPost?.postNumber,
-            replyToUsername: replyToPost?.username
+            replyToUsername: replyToPost?.username,
+            kind: .reply
         )
+        presentQuickReplyInput()
+    }
+
+    private func openBoostComposer(for post: TopicPostState) {
+        guard post.canBoost else {
+            modalRouter.presentNotice(message: "当前帖子暂时不能 Boost。")
+            return
+        }
+        guard canWriteInteractions else {
+            modalRouter.presentNotice(message: "登录后才能 Boost。")
+            return
+        }
+        // Share the bottom quick-reply chrome with comments instead of a separate sheet.
+        composerContext = FireReplyComposerContext(
+            topicId: topic.id,
+            postId: post.id,
+            replyToPostNumber: post.postNumber,
+            replyToUsername: post.username,
+            kind: .boost
+        )
+        if !replyDraft.isEmpty, composerContext?.isBoost == true {
+            // Keep draft if user was already drafting a boost; otherwise clear reply draft noise.
+        }
+        presentQuickReplyInput()
+    }
+
+    /// Apply chrome first, commit bar geometry, then focus so the keyboard and
+    /// input strip rise together (especially for swipe-to-reply).
+    private func presentQuickReplyInput() {
         buildAndApplyChromeState()
+        // Target row / height must be in the hierarchy before first-responder
+        // kicks off the keyboard animation; otherwise the bar catches up late.
+        view.layoutIfNeeded()
         quickReplyBar.focusInput()
     }
+
+    private func toggleReactionPicker(for post: TopicPostState) {
+        if expandedReactionPickerPostIDs.contains(post.id) {
+            collapseReactionPicker(animatedSnapshot: true)
+            return
+        }
+        expandReactionPicker(for: post.id, markCoachmarkSeen: true)
+    }
+
+    private func expandReactionPicker(for postID: UInt64, markCoachmarkSeen: Bool) {
+        // Single open strip at a time keeps the feed calm.
+        expandedReactionPickerPostIDs = [postID]
+        if markCoachmarkSeen {
+            FireTopicDetailReactionPickerCoachmark.markSeen()
+        }
+        buildAndApplySnapshot()
+        scheduleReactionPickerAutoCollapse()
+    }
+
+    private func collapseReactionPicker(animatedSnapshot: Bool) {
+        reactionPickerCollapseWorkItem?.cancel()
+        reactionPickerCollapseWorkItem = nil
+        guard !expandedReactionPickerPostIDs.isEmpty else { return }
+        expandedReactionPickerPostIDs.removeAll()
+        if animatedSnapshot {
+            buildAndApplySnapshot()
+        }
+    }
+
+    private func scheduleReactionPickerAutoCollapse() {
+        reactionPickerCollapseWorkItem?.cancel()
+        let expectedIDs = expandedReactionPickerPostIDs
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Ignore stale timers if the user already collapsed/changed the strip.
+            guard self.expandedReactionPickerPostIDs == expectedIDs,
+                  !expectedIDs.isEmpty else {
+                return
+            }
+            self.collapseReactionPicker(animatedSnapshot: true)
+        }
+        reactionPickerCollapseWorkItem = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.reactionPickerAutoCollapseSeconds,
+            execute: work
+        )
+    }
+
+    /// First device visit: when a writable reaction icon first becomes visible,
+    /// auto-expand once so users discover the strip, then auto-collapse.
+    private func maybePresentReactionPickerCoachmark(visiblePostNumbers: Set<UInt32>) {
+        guard !didAttemptReactionPickerCoachmark else { return }
+        guard !FireTopicDetailReactionPickerCoachmark.hasSeen else {
+            didAttemptReactionPickerCoachmark = true
+            return
+        }
+        guard canWriteInteractions else { return }
+        guard !visiblePostNumbers.isEmpty else { return }
+
+        let posts = topicDetailStore.topicDetail(for: topic.id)?.postStream.posts ?? []
+        guard let coachPost = posts.first(where: { post in
+            visiblePostNumbers.contains(post.postNumber)
+                && !post.hidden
+        }) else {
+            return
+        }
+
+        didAttemptReactionPickerCoachmark = true
+        FireTopicDetailReactionPickerCoachmark.markSeen()
+        expandReactionPicker(for: coachPost.id, markCoachmarkSeen: false)
+    }
+
+    private static let reactionPickerAutoCollapseSeconds: TimeInterval = 3.5
 
     private func openPostNumber(_ postNumber: UInt32) {
         guard postNumber > 0 else { return }
@@ -1308,15 +1450,14 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
     }
 
     private func clearComposerTarget() {
-        let shouldKeepFocus = quickReplyBar.isInputFocused
+        // Cancel target is a full dismiss of the current compose session: drop the
+        // reply/Boost target, wipe draft text, and leave the keyboard down.
         composerContext = nil
+        replyDraft = ""
+        quickReplyError = nil
         buildAndApplyChromeState()
-        if shouldKeepFocus {
-            quickReplyBar.focusInput()
-            DispatchQueue.main.async { [weak self] in
-                self?.quickReplyBar.focusInput()
-            }
-        }
+        view.layoutIfNeeded()
+        quickReplyBar.resignInputFocus()
     }
 
     private func openAdvancedComposer() {
@@ -1413,10 +1554,18 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
     private func submitQuickReply() {
         let trimmed = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            quickReplyError = "回复内容不能为空。"
+            quickReplyError = composerContext?.isBoost == true
+                ? "Boost 内容不能为空。"
+                : "回复内容不能为空。"
             buildAndApplyChromeState()
             return
         }
+
+        if composerContext?.isBoost == true {
+            submitBoostFromQuickReply(raw: trimmed)
+            return
+        }
+
         guard trimmed.count >= minimumReplyLength else {
             quickReplyError = "回复至少需要 \(minimumReplyLength) 个字。"
             buildAndApplyChromeState()
@@ -1455,6 +1604,36 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
         }
     }
 
+    private func submitBoostFromQuickReply(raw: String) {
+        guard let postId = composerContext?.postId else {
+            quickReplyError = "找不到要 Boost 的帖子。"
+            buildAndApplyChromeState()
+            return
+        }
+        quickReplyError = nil
+        buildAndApplyChromeState()
+        Task { @MainActor in
+            do {
+                try await topicDetailStore.createBoost(
+                    topicId: topic.id,
+                    postId: postId,
+                    raw: raw
+                )
+                replyDraft = ""
+                composerContext = nil
+                quickReplyBar.resignInputFocus()
+                buildAndApplyChromeState()
+                FireMotionHaptics.success()
+            } catch is CancellationError {
+                // ignore
+            } catch {
+                FireMotionHaptics.error()
+                quickReplyError = error.localizedDescription
+                buildAndApplyChromeState()
+            }
+        }
+    }
+
     private func toggleLike(for post: TopicPostState) {
         applyReactionChange(
             from: post.currentUserReaction,
@@ -1474,30 +1653,9 @@ final class FireTopicDetailViewController: UIViewController, UIGestureRecognizer
     }
 
     private func presentReactionPicker(for post: TopicPostState) {
-        if post.currentUserReaction?.canUndo == false {
-            modalRouter.presentNotice(message: "当前表情回应已超过可撤销时间，暂时不能修改。")
-            return
-        }
-
-        let options = FireTopicPresentation.reactionOptions(
-            from: viewModel.session.bootstrap.enabledReactionIds,
-            currentReactionID: post.currentUserReaction?.id
-        )
-        guard !options.isEmpty else {
-            modalRouter.presentNotice(message: "当前没有可用的表情回应。")
-            return
-        }
-
-        modalRouter.presentReactionPicker(
-            post: post,
-            options: options,
-            onSelectReaction: { [weak self] reactionID in
-                self?.toggleReaction(reactionID, for: post)
-            },
-            onShowUsers: { [weak self] reactionID in
-                self?.showReactionUsers(for: post, reactionID: reactionID)
-            }
-        )
+        // Kept for potential deep-link / overflow discovery; primary path is the
+        // inline quick-reaction strip under the action icons.
+        toggleReactionPicker(for: post)
     }
 
     private func applyReactionChange(

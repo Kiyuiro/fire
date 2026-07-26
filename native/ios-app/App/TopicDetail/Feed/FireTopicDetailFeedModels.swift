@@ -157,7 +157,10 @@ final class FireTopicDetailRuntimeInteractions {
     let onOpenImage: (FireCookedImage) -> Void
     let onToggleLike: (TopicPostState) -> Void
     let onSelectReaction: (TopicPostState, String) -> Void
-    let onOpenReactionPicker: (TopicPostState) -> Void
+    let onToggleReactionPicker: (TopicPostState) -> Void
+    let onBoostPost: (TopicPostState) -> Void
+    let quickReactionOptionsProvider: () -> [FireReactionOption]
+    let isReactionPickerExpanded: (UInt64) -> Bool
     let onQuotePost: (TopicPostState) -> Void
     let onEditPost: (TopicPostState) -> Void
     let onBookmarkPost: (TopicPostState) -> Void
@@ -192,7 +195,10 @@ final class FireTopicDetailRuntimeInteractions {
         onOpenImage: @escaping (FireCookedImage) -> Void,
         onToggleLike: @escaping (TopicPostState) -> Void,
         onSelectReaction: @escaping (TopicPostState, String) -> Void,
-        onOpenReactionPicker: @escaping (TopicPostState) -> Void,
+        onToggleReactionPicker: @escaping (TopicPostState) -> Void,
+        onBoostPost: @escaping (TopicPostState) -> Void,
+        quickReactionOptionsProvider: @escaping () -> [FireReactionOption],
+        isReactionPickerExpanded: @escaping (UInt64) -> Bool,
         onQuotePost: @escaping (TopicPostState) -> Void,
         onEditPost: @escaping (TopicPostState) -> Void,
         onBookmarkPost: @escaping (TopicPostState) -> Void,
@@ -226,7 +232,10 @@ final class FireTopicDetailRuntimeInteractions {
         self.onOpenImage = onOpenImage
         self.onToggleLike = onToggleLike
         self.onSelectReaction = onSelectReaction
-        self.onOpenReactionPicker = onOpenReactionPicker
+        self.onToggleReactionPicker = onToggleReactionPicker
+        self.onBoostPost = onBoostPost
+        self.quickReactionOptionsProvider = quickReactionOptionsProvider
+        self.isReactionPickerExpanded = isReactionPickerExpanded
         self.onQuotePost = onQuotePost
         self.onEditPost = onEditPost
         self.onBookmarkPost = onBookmarkPost
@@ -292,7 +301,10 @@ struct FireTopicDetailRuntimeConfiguration: @unchecked Sendable {
     var onOpenImage: (FireCookedImage) -> Void { interactions.onOpenImage }
     var onToggleLike: (TopicPostState) -> Void { interactions.onToggleLike }
     var onSelectReaction: (TopicPostState, String) -> Void { interactions.onSelectReaction }
-    var onOpenReactionPicker: (TopicPostState) -> Void { interactions.onOpenReactionPicker }
+    var onToggleReactionPicker: (TopicPostState) -> Void { interactions.onToggleReactionPicker }
+    var onBoostPost: (TopicPostState) -> Void { interactions.onBoostPost }
+    var quickReactionOptions: [FireReactionOption] { interactions.quickReactionOptionsProvider() }
+    var isReactionPickerExpanded: (UInt64) -> Bool { interactions.isReactionPickerExpanded }
     var onQuotePost: (TopicPostState) -> Void { interactions.onQuotePost }
     var onEditPost: (TopicPostState) -> Void { interactions.onEditPost }
     var onBookmarkPost: (TopicPostState) -> Void { interactions.onBookmarkPost }
@@ -701,7 +713,8 @@ struct FireTopicDetailRuntimeConfiguration: @unchecked Sendable {
                 isReplyThreadExpanded: false,
                 isLoadingReplyContext: false,
                 textExpansionState: .disabled,
-                allowsInlineOverflowActions: false
+                // OP also exposes reply / react / boost primary actions.
+                allowsInlineOverflowActions: true
             )
 
         case .reply:
@@ -951,6 +964,7 @@ struct FireTopicDetailRuntimeConfiguration: @unchecked Sendable {
             String(!post.reactions.isEmpty),
             String(replyShortcutCount != nil),
             String(isReplyThreadExpanded),
+            String(isReactionPickerExpanded(post.id)),
             String(textExpansionState.isExpanded),
             String(textExpansionState.isCollapsible),
         ].joined(separator: "\u{1F}")
@@ -994,6 +1008,7 @@ struct FireTopicDetailRuntimeConfiguration: @unchecked Sendable {
         parts.append(post.bookmarkReminderAt ?? "")
         parts.append(String(textExpansionState.isExpanded))
         parts.append(String(textExpansionState.isCollapsible))
+        parts.append(String(isReactionPickerExpanded(post.id)))
         parts.append(String(canWriteInteractions))
         parts.append(String(isMutatingPost(post.id)))
         parts.append(String(isSearchHighlighted(postID: post.id)))

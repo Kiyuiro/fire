@@ -17,7 +17,10 @@ enum FirePostCellLayoutCalculator {
     static let imageTopSpacing: CGFloat = 10
     static let imageSpacing: CGFloat = 10
     static let replyShortcutTopSpacing: CGFloat = 6
-    static let replyShortcutHeight: CGFloat = 26
+    /// Match action-row icon hit height so expand/collapse is not a smaller target.
+    static let replyShortcutHeight: CGFloat = 28
+    /// Icon + count chip; slightly wider than a lone action icon for the count label.
+    static let replyShortcutMinWidth: CGFloat = 60
     static let boostTopSpacing: CGFloat = 4
     static let boostSpacing: CGFloat = 6
     static let boostHorizontalInset: CGFloat = 10
@@ -41,7 +44,11 @@ enum FirePostCellLayoutCalculator {
     static let actionRowHeight: CGFloat = 28
     static let actionIconSize: CGFloat = 28
     static let actionIconSpacing: CGFloat = 10
-    static let reactionTopSpacing: CGFloat = 0
+    static let reactionPickerStripTopSpacing: CGFloat = 6
+    static let reactionPickerStripHeight: CGFloat = 40
+    static let reactionPickerButtonSize = CGSize(width: 36, height: 36)
+    static let reactionPickerButtonSpacing: CGFloat = 6
+    static let reactionTopSpacing: CGFloat = 6
     /// Compact reaction pills — narrower/shorter than the previous caption1 capsules.
     static let reactionChipHeight: CGFloat = 22
     static let reactionChipHorizontalSpacing: CGFloat = 5
@@ -262,12 +269,10 @@ enum FirePostCellLayoutCalculator {
             cursorY += boostHeight
         }
 
-        // Action row: compact inline controls + optional reaction chips share one line.
+        // Action row (icons) + optional picker strip + dedicated reaction chips row.
         let replyShortcutFrame: CGRect?
         let reactionsFrame: CGRect?
-        let hasActionRow = key.showsInlineActions
-            || key.replyShortcutCount != nil
-            || key.hasReactions
+        let hasActionRow = key.showsInlineActions || key.replyShortcutCount != nil
         if hasActionRow {
             if textFrame != nil || !imageFrames.isEmpty || !pollFrames.isEmpty || !boostFrames.isEmpty {
                 cursorY += actionRowTopSpacing
@@ -279,8 +284,7 @@ enum FirePostCellLayoutCalculator {
             let rowMaxX = bodyLeading + bodyAvailableWidth
 
             if key.replyShortcutCount != nil {
-                // Icon + count chip; keep it narrow like the home-list metric.
-                let width: CGFloat = 56
+                let width = Self.replyShortcutMinWidth
                 replyShortcutFrame = CGRect(
                     x: actionX,
                     y: actionRowY,
@@ -293,25 +297,42 @@ enum FirePostCellLayoutCalculator {
             }
 
             if key.showsInlineActions {
-                // Collapsed overflow is a single `...` control; expanded cluster is
-                // transient UI state and does not need a taller reserved row.
-                actionX = min(actionX + actionIconSize + actionSpacing, rowMaxX)
-            }
-
-            if key.hasReactions {
-                // Prefetch height uses a single compact line. Wrapped OP rows self-size via
-                // Texture layoutSpec (line spacing comes from chip bottom insets).
-                reactionsFrame = CGRect(
-                    x: actionX,
-                    y: actionRowY,
-                    width: max(rowMaxX - actionX, 1),
-                    height: Self.reactionChipHeight
-                )
-            } else {
-                reactionsFrame = nil
+                let slots = max(key.primaryActionSlotCount, 1)
+                let reserved = CGFloat(slots) * actionIconSize
+                    + CGFloat(max(slots - 1, 0)) * actionSpacing
+                actionX = min(actionX + reserved + actionSpacing, rowMaxX)
             }
 
             cursorY += Self.actionRowHeight
+
+            if key.isReactionPickerExpanded {
+                cursorY += Self.reactionPickerStripTopSpacing + Self.reactionPickerStripHeight
+            }
+
+            if key.hasReactions {
+                cursorY += Self.reactionTopSpacing
+                reactionsFrame = CGRect(
+                    x: bodyLeading,
+                    y: cursorY,
+                    width: max(bodyAvailableWidth, 1),
+                    height: Self.reactionChipHeight
+                )
+                cursorY += Self.reactionChipHeight
+            } else {
+                reactionsFrame = nil
+            }
+        } else if key.hasReactions {
+            replyShortcutFrame = nil
+            if textFrame != nil || !imageFrames.isEmpty || !pollFrames.isEmpty || !boostFrames.isEmpty {
+                cursorY += actionRowTopSpacing
+            }
+            reactionsFrame = CGRect(
+                x: bodyLeading,
+                y: cursorY,
+                width: max(bodyAvailableWidth, 1),
+                height: Self.reactionChipHeight
+            )
+            cursorY += Self.reactionChipHeight
         } else {
             replyShortcutFrame = nil
             reactionsFrame = nil

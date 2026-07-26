@@ -50,11 +50,14 @@ struct FireTopicDetailSnapshotAssembler: Sendable {
 
     func makeQuickReplyState(from state: FireTopicDetailComposerState) -> FireTopicDetailQuickReplyState {
         let trimmedDraft = state.replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isBoost = state.composerContext?.isBoost == true
         let validationMessage: String?
         if let quickReplyError = state.quickReplyError,
            quickReplyError.isEmpty == false {
             validationMessage = quickReplyError
-        } else if !trimmedDraft.isEmpty, trimmedDraft.count < state.minimumReplyLength {
+        } else if !isBoost,
+                  !trimmedDraft.isEmpty,
+                  trimmedDraft.count < state.minimumReplyLength {
             validationMessage = "回复至少需要 \(state.minimumReplyLength) 个字"
         } else {
             validationMessage = nil
@@ -110,7 +113,8 @@ struct FireTopicDetailSnapshotAssembler: Sendable {
             mutatingPostIDs: state.mutatingPostIDs,
             loadingPostReplyContextIDs: state.loadingPostReplyContextIDs,
             expandedPostTextIDs: state.expandedPostTextIDs,
-            expandedReplyRootPostIDs: state.expandedReplyRootPostIDs
+            expandedReplyRootPostIDs: state.expandedReplyRootPostIDs,
+            expandedReactionPickerPostIDs: state.expandedReactionPickerPostIDs
         )
     }
 

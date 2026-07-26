@@ -2,31 +2,75 @@ import Foundation
 
 // MARK: - Composer Contexts
 
+/// One-shot coachmark: auto-expand the inline reaction strip the first time a
+/// writable post action row becomes visible on this device.
+enum FireTopicDetailReactionPickerCoachmark {
+    private static let defaultsKey = "fire.topicDetail.reactionPicker.coachmark.seen"
+
+    static var hasSeen: Bool {
+        UserDefaults.standard.bool(forKey: defaultsKey)
+    }
+
+    static func markSeen() {
+        UserDefaults.standard.set(true, forKey: defaultsKey)
+    }
+
+#if DEBUG
+    static func resetForTesting() {
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+    }
+#endif
+}
+
 struct FireReplyComposerContext: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case reply
+        case boost
+    }
+
     let topicId: UInt64
     let postId: UInt64?
     let replyToPostNumber: UInt32?
     let replyToUsername: String?
+    var kind: Kind = .reply
 
     var id: String {
-        "\(topicId)-\(postId ?? 0)-\(replyToPostNumber ?? 0)"
+        "\(kind == .boost ? "boost" : "reply")-\(topicId)-\(postId ?? 0)-\(replyToPostNumber ?? 0)"
     }
 
+    var isBoost: Bool { kind == .boost }
+
     var targetSummary: String {
-        if let replyToUsername, !replyToUsername.isEmpty {
-            return "回复 \(replyToUsername)"
+        switch kind {
+        case .boost:
+            if let replyToUsername, !replyToUsername.isEmpty {
+                return "Boost @\(replyToUsername)"
+            }
+            if let replyToPostNumber {
+                return "Boost #\(replyToPostNumber)"
+            }
+            return "Boost"
+        case .reply:
+            if let replyToUsername, !replyToUsername.isEmpty {
+                return "回复 \(replyToUsername)"
+            }
+            if let replyToPostNumber {
+                return "回复 #\(replyToPostNumber)"
+            }
+            return "回复话题"
         }
-        if let replyToPostNumber {
-            return "回复 #\(replyToPostNumber)"
-        }
-        return "回复话题"
     }
 
     var placeholder: String {
-        if let replyToUsername, !replyToUsername.isEmpty {
-            return "回复\(replyToUsername):"
+        switch kind {
+        case .boost:
+            return "写一句 Boost…"
+        case .reply:
+            if let replyToUsername, !replyToUsername.isEmpty {
+                return "回复\(replyToUsername):"
+            }
+            return "快速回复…"
         }
-        return "快速回复…"
     }
 }
 
@@ -117,6 +161,7 @@ struct FireTopicDetailFeedInvalidationToken: Hashable {
     let baseURLString: String
     let activeSearchPostID: UInt64?
     let expandedReplyRootPostIDs: Set<UInt64>
+    let expandedReactionPickerPostIDs: Set<UInt64>
 }
 
 struct FireTopicDetailChromeInvalidationToken: Hashable {
@@ -150,6 +195,7 @@ struct FireTopicDetailInteractionInvalidationToken: Hashable {
     let loadingPostReplyContextIDs: Set<UInt64>
     let expandedPostTextIDs: Set<UInt64>
     let expandedReplyRootPostIDs: Set<UInt64>
+    let expandedReactionPickerPostIDs: Set<UInt64>
 }
 
 // MARK: - Topic Notification Level

@@ -498,3 +498,9 @@ jobs:
           ANDROID_NDK_VERSION: ${{ env.ANDROID_NDK_VERSION }}
           FIRE_SKIP_RUST_CROSS_BUILD: "1"
         run: ./gradlew assembleRelease
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: native/android-app/app/build/outputs/apk/release/*.apk
